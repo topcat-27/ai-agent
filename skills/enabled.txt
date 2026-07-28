@@ -1,0 +1,4 @@
+# One skill ID per line. Remove a line to disable that skill.
+project-assistant
+task-capture
+weekly-status

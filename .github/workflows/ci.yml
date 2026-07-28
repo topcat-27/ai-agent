@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Contracts and static validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.16.0
+          cache: npm
+          cache-dependency-path: apps/chat/package-lock.json
+
+      - name: Install chat dependencies
+        run: npm ci --prefix apps/chat --ignore-scripts
+
+      - name: Test chat gateway contracts
+        run: npm test --prefix apps/chat
+
+      - name: Validate workflows, skills, template, and pilot evidence
+        run: |
+          node scripts/validate-workflows.mjs
+          node tests/phase5/test-skills.mjs
+          node scripts/validate-template-readiness.mjs
+          node scripts/validate-release.mjs
+          node --test tests/phase7/test-pilot-evaluator.mjs
+          node scripts/evaluate-pilot.mjs --allow-pending
+
+      - name: Check shell syntax
+        run: |
+          bash -n scripts/*.sh
+          bash -n ./*.command
+
+  powershell:
+    name: Windows helper syntax
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Parse PowerShell helpers
+        shell: pwsh
+        run: |
+          $failures = @()
+          Get-ChildItem scripts/windows/*.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failures += $errors
+            }
+          }
+          if ($failures.Count -gt 0) {
+            $failures | ForEach-Object { Write-Error $_ }
+            exit 1
+          }
+
+  docker-smoke:
+    name: Docker smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install smoke-test host tools
+        run: sudo apt-get update && sudo apt-get install --yes jq lsof
+
+      - name: Run Phase 3 agent smoke
+        run: ./scripts/test-phase3.sh
+
+      - name: Run Phase 4 tool smoke
+        run: ./scripts/test-phase4.sh
+
+      - name: Run Phase 5 safety smoke
+        run: ./scripts/test-phase5.sh
+
+      - name: Run Phase 6 packaging smoke
+        run: ./scripts/test-phase6.sh
+
+      - name: Run Phase 7 validation smoke
+        run: ./scripts/test-phase7.sh
+
+      - name: Run Phase 8 release smoke
+        run: ./scripts/test-phase8.sh

@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="A private, local chat interface for your project management agent."
+    />
+    <title>Project Partner</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/agent.config.js" defer></script>
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#message-input">Skip to message box</a>
+
+    <main class="app-shell">
+      <aside class="agent-panel" aria-labelledby="agent-name">
+        <div>
+          <div class="brand">
+            <span class="brand__mark" id="agent-initials" aria-hidden="true">PP</span>
+            <div>
+              <p class="brand__eyebrow">My local agent</p>
+              <h1 id="agent-name">Project Partner</h1>
+            </div>
+          </div>
+
+          <p class="agent-panel__subtitle" id="agent-subtitle">
+            A calm co-pilot for turning ideas into next steps.
+          </p>
+
+          <div class="local-status">
+            <span class="local-status__dot" aria-hidden="true"></span>
+            <span>Running privately on this computer</span>
+          </div>
+        </div>
+
+        <section class="starter-guide" aria-labelledby="starter-title">
+          <p class="section-label" id="starter-title">Good things to ask</p>
+          <ul>
+            <li>Turn a rough idea into a practical plan</li>
+            <li>Find the most useful next action</li>
+            <li>Summarise project notes and decisions</li>
+          </ul>
+        </section>
+
+        <p class="privacy-note">
+          <span aria-hidden="true">✦</span>
+          This workshop version stays on your local Docker network.
+        </p>
+      </aside>
+
+      <section class="chat-card" aria-labelledby="conversation-title">
+        <header class="chat-header">
+          <div class="chat-header__identity">
+            <span class="mobile-mark" id="mobile-agent-initials" aria-hidden="true">
+              PP
+            </span>
+            <div>
+              <p class="chat-header__kicker">Conversation</p>
+              <h2 id="conversation-title">Ask <span id="conversation-agent-name">Project Partner</span></h2>
+            </div>
+          </div>
+
+          <button class="reset-button" id="reset-button" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M4.93 4.93a10 10 0 1 1-1.79 11.46M3 8V3m0 0h5"
+                fill="none"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="1.8"
+              />
+            </svg>
+            <span>New conversation</span>
+          </button>
+        </header>
+
+        <div
+          class="conversation"
+          id="conversation"
+          role="log"
+          aria-live="polite"
+          aria-relevant="additions"
+          aria-busy="false"
+          tabindex="-1"
+        ></div>
+
+        <div class="composer-area">
+          <section class="suggestions" id="suggestions" aria-labelledby="suggestions-title">
+            <p class="section-label" id="suggestions-title">Try an example</p>
+            <div class="suggestion-list" id="suggestion-list"></div>
+          </section>
+
+          <form class="composer" id="chat-form">
+            <label class="visually-hidden" for="message-input">
+              Message your project partner
+            </label>
+            <div class="composer__field">
+              <textarea
+                id="message-input"
+                name="message"
+                rows="1"
+                maxlength="4000"
+                placeholder="What would you like help with?"
+                autocomplete="off"
+                required
+              ></textarea>
+              <span class="character-count" id="character-count" aria-hidden="true">
+                0 / 4000
+              </span>
+            </div>
+            <button class="send-button" id="send-button" type="submit">
+              <span id="send-button-label">Send</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="m5 12 14-7-4.5 14-2.8-5.7L5 12Z"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="1.8"
+                />
+              </svg>
+            </button>
+          </form>
+
+          <div class="composer-meta">
+            <p id="request-status" role="status" aria-live="polite">
+              Press Enter to send · Shift + Enter for a new line
+            </p>
+            <p>Local workshop build</p>
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

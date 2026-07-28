@@ -1,0 +1,79 @@
+name: ${COMPOSE_PROJECT_NAME:-ai-solopreneur}
+
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.30.5@sha256:450853cd21a2ce36587c4c860eb26927c1ceba9496bf55f4c213b5d3a6dc8c6f
+    restart: unless-stopped
+    environment:
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Australia/Melbourne}
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"
+      N8N_COMMUNITY_PACKAGES_ENABLED: "false"
+      N8N_COMPRESSION_NODE_MAX_DECOMPRESSED_SIZE_BYTES: "268435456"
+      N8N_COMPRESSION_NODE_MAX_ZIP_ENTRIES: "1000"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_EDITOR_BASE_URL: http://localhost:${N8N_PORT:-5678}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Run the setup script to create .env}
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      N8N_HOST: localhost
+      N8N_LISTEN_ADDRESS: 0.0.0.0
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: http
+      N8N_RUNNERS_TASK_TIMEOUT: "60"
+      N8N_SECURE_COOKIE: "false"
+      N8N_UNVERIFIED_PACKAGES_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_WEBHOOK_URL: http://localhost:${N8N_PORT:-5678}/
+      TZ: ${GENERIC_TIMEZONE:-Australia/Melbourne}
+    ports:
+      - 127.0.0.1:${N8N_PORT:-5678}:5678
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n/workflows:/opt/ai-solopreneur/workflows:ro
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:5678/healthz')
+          .then((response) => process.exit(response.ok ? 0 : 1))
+          .catch(() => process.exit(1))
+      interval: 5s
+      timeout: 3s
+      retries: 36
+      start_period: 15s
+    stop_grace_period: 30s
+
+  chat:
+    image: ai-solopreneur-chat:0.1.0
+    build:
+      context: ./apps/chat
+    restart: unless-stopped
+    depends_on:
+      n8n:
+        condition: service_healthy
+    environment:
+      CHAT_REQUEST_TIMEOUT_MS: "60000"
+      N8N_CHAT_WEBHOOK_URL: http://n8n:5678/webhook/chat
+      PORT: "3000"
+    ports:
+      - 127.0.0.1:${CHAT_PORT:-3000}:3000
+    volumes:
+      - ./apps/chat/public:/app/public:ro
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:3000/health')
+          .then((response) => process.exit(response.ok ? 0 : 1))
+          .catch(() => process.exit(1))
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+volumes:
+  n8n_data:
