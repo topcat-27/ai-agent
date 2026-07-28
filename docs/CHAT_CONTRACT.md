@@ -54,6 +54,97 @@ Successful response:
 
 `runId` is optional in the first workflow but reserved for diagnostics and future asynchronous processing.
 
+### Browser-facing file upload endpoint
+
+```http
+POST /api/upload
+Content-Type: application/json
+```
+
+This backward-compatible addition lets the browser turn an uploaded PDF or
+document into a plain-text transcript that the learner can review in the
+composer before sending. Extraction happens in the gateway; the file bytes never
+reach n8n or Claude.
+
+Request (the browser reads the file and base64-encodes it):
+
+```json
+{
+  "filename": "team-standup.pdf",
+  "dataBase64": "JVBERi0xLjQK..."
+}
+```
+
+Successful response:
+
+```json
+{
+  "filename": "team-standup.pdf",
+  "characters": 4820,
+  "truncated": false,
+  "text": "Meeting transcript..."
+}
+```
+
+Rules the gateway enforces:
+
+| Field | Rule |
+| --- | --- |
+| `filename` | Required string, 1–255 characters, with a supported extension |
+| Supported extensions | `.pdf`, `.docx`, `.txt`, `.md` |
+| `dataBase64` | Required base64 string of the raw file |
+| Raw file size | 10 MB maximum |
+| Extracted `text` | Trimmed and normalised; capped at 200,000 characters (`truncated` reports the cap) |
+
+`text` is plain text only; the browser inserts it into the composer as untrusted
+text under the same rules as any other message. The extracted transcript is still
+sent as a normal `message`, within the 100,000-character message limit.
+
+### Browser-facing link ingest endpoint
+
+```http
+POST /api/ingest-url
+Content-Type: application/json
+```
+
+This backward-compatible addition turns a supported meeting-notetaker share link
+into a transcript the learner can review before sending. The gateway fetches the
+link server-side and extracts plain text; the browser only ever sends the URL.
+
+Request:
+
+```json
+{
+  "url": "https://fathom.video/share/<token>"
+}
+```
+
+Successful response:
+
+```json
+{
+  "source": "fathom",
+  "title": "PitchUp x AO StartUps",
+  "characters": 25831,
+  "truncated": false,
+  "text": "Meeting transcript..."
+}
+```
+
+Rules the gateway enforces:
+
+| Field | Rule |
+| --- | --- |
+| `url` | Required HTTPS string, 1–2,048 characters |
+| Supported sources | `fathom.video/share/…` and `notes.granola.ai/t|d/…` only |
+| Host allowlist | Enforced on every redirect hop (SSRF guard); no other host is ever contacted |
+| Response caps | 8 MB per fetch, 4 redirects, request timeout applies |
+| Extracted `text` | Trimmed and normalised; capped at 100,000 characters (`truncated` reports the cap) |
+
+Both services expose the shared meeting content publicly to anyone with the link,
+so no API key or login is used. The extracted transcript is sent as a normal
+`message`, within the 100,000-character message limit.
+
 ### Gateway-to-n8n endpoint
 
 The gateway sends the validated request over the private Docker network:
@@ -75,7 +166,7 @@ The gateway must enforce:
 | --- | --- |
 | `sessionId` | Required UUID string |
 | `message` | Required string after trimming |
-| `message` length | 1 to 4,000 characters after trimming |
+| `message` length | 1 to 100,000 characters after trimming |
 | Unknown fields | Ignored in version 1 |
 | Request body | JSON only |
 
@@ -111,7 +202,12 @@ Supported error codes:
 | HTTP status | Code | Meaning |
 | --- | --- | --- |
 | 400 | `INVALID_REQUEST` | JSON or required fields are invalid |
-| 413 | `MESSAGE_TOO_LONG` | Trimmed message exceeds 4,000 characters |
+| 413 | `MESSAGE_TOO_LONG` | Trimmed message exceeds 100,000 characters |
+| 413 | `FILE_TOO_LARGE` | Uploaded file exceeds 10 MB (`/api/upload`) |
+| 415 | `UNSUPPORTED_FILE` | Uploaded file type is not supported (`/api/upload`) |
+| 415 | `UNSUPPORTED_SOURCE` | Link is not a supported meeting source (`/api/ingest-url`) |
+| 422 | `EXTRACTION_FAILED` | No readable text could be extracted from the file (`/api/upload`) |
+| 502 | `FETCH_FAILED` | The link could not be fetched or parsed (`/api/ingest-url`) |
 | 429 | `RATE_LIMITED` | Claude or a future local limiter rejected the request |
 | 502 | `AGENT_ERROR` | n8n returned an invalid response or the agent failed |
 | 503 | `AGENT_UNAVAILABLE` | n8n or the active workflow cannot be reached |

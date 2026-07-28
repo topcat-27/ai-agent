@@ -14,14 +14,45 @@
     ],
   };
   const STORAGE_KEY = "ai-solopreneur-chat-session";
+  const MESSAGE_LIMIT = 100_000;
+  const MAX_UPLOAD_BYTES = 10 * 1_024 * 1_024;
+  const SUPPORTED_EXTENSIONS = [".pdf", ".docx", ".txt", ".md"];
+  const SUPPORTED_LINK_HOSTS = {
+    "fathom.video": "/share/",
+    "notes.granola.ai": "/t/",
+  };
+
+  function supportedLinkIn(text) {
+    const trimmed = text.trim();
+    if (!/^https:\/\/\S+$/.test(trimmed) || /\s/.test(trimmed)) {
+      return null;
+    }
+    let url;
+    try {
+      url = new URL(trimmed);
+    } catch {
+      return null;
+    }
+    const prefix = SUPPORTED_LINK_HOSTS[url.hostname];
+    if (!prefix) {
+      return null;
+    }
+    if (url.hostname === "notes.granola.ai") {
+      return /^\/[td]\//.test(url.pathname) ? trimmed : null;
+    }
+    return url.pathname.startsWith(prefix) ? trimmed : null;
+  }
 
   const elements = {
     agentInitials: document.querySelector("#agent-initials"),
     agentName: document.querySelector("#agent-name"),
     agentSubtitle: document.querySelector("#agent-subtitle"),
+    attachButton: document.querySelector("#attach-button"),
+    attachmentStatus: document.querySelector("#attachment-status"),
     characterCount: document.querySelector("#character-count"),
     conversation: document.querySelector("#conversation"),
     conversationAgentName: document.querySelector("#conversation-agent-name"),
+    fileInput: document.querySelector("#file-input"),
     form: document.querySelector("#chat-form"),
     input: document.querySelector("#message-input"),
     mobileAgentInitials: document.querySelector("#mobile-agent-initials"),
@@ -32,6 +63,8 @@
     suggestionList: document.querySelector("#suggestion-list"),
     suggestions: document.querySelector("#suggestions"),
   };
+
+  let uploadInProgress = false;
 
   let sessionId = loadOrCreateSession();
   let requestInProgress = false;
@@ -156,6 +189,183 @@
     return avatar;
   }
 
+  // --- Safe Markdown rendering for agent replies -------------------------
+  // The reply is untrusted model output. Everything is HTML-escaped first, then
+  // only a fixed whitelist of tags is emitted, so no markup in the reply can
+  // ever execute. Link hrefs are restricted to http(s)/mailto.
+  const CODE_SENTINEL = "";
+
+  function escapeHtml(value) {
+    return value
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function safeUrl(rawUrl) {
+    const candidate = rawUrl.replace(/&amp;/g, "&").trim();
+    if (/^(https?:\/\/|mailto:)/i.test(candidate) && !/[\s"'<>`]/.test(candidate)) {
+      return candidate;
+    }
+    return null;
+  }
+
+  function renderInline(text) {
+    let out = escapeHtml(text);
+
+    const codeSpans = [];
+    out = out.replace(/`([^`]+)`/g, (_match, code) => {
+      codeSpans.push(code);
+      return `${CODE_SENTINEL}${codeSpans.length - 1}${CODE_SENTINEL}`;
+    });
+
+    out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_match, label, url) => {
+      const href = safeUrl(url);
+      if (!href) {
+        return label;
+      }
+      return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer nofollow">${label}</a>`;
+    });
+
+    out = out
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+      .replace(/(^|[^_\w])_([^_\n]+)_/g, "$1<em>$2</em>");
+
+    out = out.replace(
+      new RegExp(`${CODE_SENTINEL}(\\d+)${CODE_SENTINEL}`, "g"),
+      (_match, index) => `<code>${codeSpans[Number(index)]}</code>`,
+    );
+    return out;
+  }
+
+  function isTableSeparator(line) {
+    return line !== undefined && /^\s*\|?[\s:|-]+\|?\s*$/.test(line) && /-/.test(line);
+  }
+
+  function markdownToHtml(source) {
+    const lines = source.replace(/\r\n?/g, "\n").split("\n");
+    const html = [];
+    let i = 0;
+
+    const parseRow = (line) =>
+      line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+
+    while (i < lines.length) {
+      const line = lines[i];
+
+      const fence = /^```/.test(line);
+      if (fence) {
+        const buffer = [];
+        i += 1;
+        while (i < lines.length && !/^```/.test(lines[i])) {
+          buffer.push(lines[i]);
+          i += 1;
+        }
+        i += 1;
+        html.push(`<pre><code>${escapeHtml(buffer.join("\n"))}</code></pre>`);
+        continue;
+      }
+
+      if (/^\s*$/.test(line)) {
+        i += 1;
+        continue;
+      }
+
+      const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+      if (heading) {
+        const level = Math.min(heading[1].length, 6);
+        html.push(`<h${level}>${renderInline(heading[2].trim())}</h${level}>`);
+        i += 1;
+        continue;
+      }
+
+      if (/^\s*([-*_])\1\1+\s*$/.test(line)) {
+        html.push("<hr />");
+        i += 1;
+        continue;
+      }
+
+      if (line.includes("|") && isTableSeparator(lines[i + 1])) {
+        const headers = parseRow(line);
+        i += 2;
+        const rows = [];
+        while (i < lines.length && lines[i].includes("|") && !/^\s*$/.test(lines[i])) {
+          rows.push(parseRow(lines[i]));
+          i += 1;
+        }
+        let table = `<table><thead><tr>${headers
+          .map((cell) => `<th>${renderInline(cell)}</th>`)
+          .join("")}</tr></thead>`;
+        if (rows.length) {
+          table += `<tbody>${rows
+            .map(
+              (row) =>
+                `<tr>${headers
+                  .map((_header, index) => `<td>${renderInline(row[index] ?? "")}</td>`)
+                  .join("")}</tr>`,
+            )
+            .join("")}</tbody>`;
+        }
+        html.push(`${table}</table>`);
+        continue;
+      }
+
+      if (/^\s*[-*+]\s+/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) {
+          items.push(lines[i].replace(/^\s*[-*+]\s+/, ""));
+          i += 1;
+        }
+        html.push(`<ul>${items.map((item) => `<li>${renderInline(item)}</li>`).join("")}</ul>`);
+        continue;
+      }
+
+      if (/^\s*\d+\.\s+/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+          items.push(lines[i].replace(/^\s*\d+\.\s+/, ""));
+          i += 1;
+        }
+        html.push(`<ol>${items.map((item) => `<li>${renderInline(item)}</li>`).join("")}</ol>`);
+        continue;
+      }
+
+      if (/^\s*>\s?/.test(line)) {
+        const buffer = [];
+        while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+          buffer.push(lines[i].replace(/^\s*>\s?/, ""));
+          i += 1;
+        }
+        html.push(`<blockquote>${markdownToHtml(buffer.join("\n"))}</blockquote>`);
+        continue;
+      }
+
+      const paragraph = [];
+      while (
+        i < lines.length &&
+        !/^\s*$/.test(lines[i]) &&
+        !/^#{1,6}\s+/.test(lines[i]) &&
+        !/^\s*[-*+]\s+/.test(lines[i]) &&
+        !/^\s*\d+\.\s+/.test(lines[i]) &&
+        !/^```/.test(lines[i]) &&
+        !/^\s*>\s?/.test(lines[i]) &&
+        !(lines[i].includes("|") && isTableSeparator(lines[i + 1]))
+      ) {
+        paragraph.push(lines[i]);
+        i += 1;
+      }
+      if (paragraph.length) {
+        html.push(`<p>${renderInline(paragraph.join("\n")).replace(/\n/g, "<br />")}</p>`);
+      }
+    }
+
+    return html.join("\n");
+  }
+
   function addMessage(kind, text) {
     const wrapper = document.createElement("article");
     wrapper.className = `message message--${kind}`;
@@ -167,9 +377,16 @@
     label.className = "message__label";
     label.textContent = kind === "agent" ? config.name : "You";
 
-    const copy = document.createElement("p");
-    copy.className = "message__copy";
-    copy.textContent = text;
+    let copy;
+    if (kind === "agent") {
+      copy = document.createElement("div");
+      copy.className = "message__copy message__copy--rich";
+      copy.innerHTML = markdownToHtml(text);
+    } else {
+      copy = document.createElement("p");
+      copy.className = "message__copy";
+      copy.textContent = text;
+    }
 
     body.append(label, copy);
     wrapper.append(createAvatar(kind), body);
@@ -272,6 +489,7 @@
     elements.input.disabled = isBusy;
     elements.sendButton.disabled = isBusy;
     elements.resetButton.disabled = isBusy;
+    elements.attachButton.disabled = isBusy || uploadInProgress;
     for (const suggestion of elements.suggestionList.querySelectorAll("button")) {
       suggestion.disabled = isBusy;
     }
@@ -292,6 +510,178 @@
       return errorBody.error.message;
     }
     return "The local agent could not reply. Check that n8n is running, then try again.";
+  }
+
+  function setAttachmentStatus(message, kind) {
+    if (!message) {
+      elements.attachmentStatus.hidden = true;
+      elements.attachmentStatus.textContent = "";
+      elements.attachmentStatus.className = "attachment-status";
+      return;
+    }
+    elements.attachmentStatus.hidden = false;
+    elements.attachmentStatus.textContent = message;
+    elements.attachmentStatus.className = `attachment-status attachment-status--${kind}`;
+  }
+
+  function extensionOf(name) {
+    const match = /\.[^.]+$/.exec(name.toLowerCase());
+    return match ? match[0] : "";
+  }
+
+  function readFileAsBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("read-failed"));
+      reader.onload = () => {
+        const result = String(reader.result);
+        const comma = result.indexOf(",");
+        resolve(comma >= 0 ? result.slice(comma + 1) : result);
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function insertTranscript(sourceLabel, data) {
+    const existing = elements.input.value.trim();
+    const separator = existing ? "\n\n" : "";
+    elements.input.value = `${existing}${separator}${data.text}`;
+    updateCharacterCount();
+    resizeInput();
+    elements.input.focus();
+
+    const over = elements.input.value.length > MESSAGE_LIMIT;
+    const parts = [
+      `Added transcript from ${sourceLabel} (${data.characters.toLocaleString()} characters).`,
+    ];
+    if (data.truncated) {
+      parts.push("It was long, so it was shortened.");
+    }
+    if (over) {
+      parts.push(
+        `Keep messages under ${MESSAGE_LIMIT.toLocaleString()} characters — trim it before sending.`,
+      );
+    } else {
+      parts.push("Review it, add any instruction, then send.");
+    }
+    setAttachmentStatus(parts.join(" "), over ? "error" : "success");
+  }
+
+  async function handleFileSelection(file) {
+    if (!file || requestInProgress || uploadInProgress) {
+      return;
+    }
+
+    if (!SUPPORTED_EXTENSIONS.includes(extensionOf(file.name))) {
+      setAttachmentStatus(
+        "That file type is not supported. Choose a PDF, Word (.docx), text, or Markdown file.",
+        "error",
+      );
+      return;
+    }
+
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setAttachmentStatus("That file is too large. Choose a file under 10 MB.", "error");
+      return;
+    }
+
+    uploadInProgress = true;
+    elements.attachButton.disabled = true;
+    setAttachmentStatus(`Reading “${file.name}”…`, "working");
+
+    try {
+      const dataBase64 = await readFileAsBase64(file);
+      const response = await fetch("/api/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: file.name, dataBase64 }),
+      });
+
+      let responseBody = null;
+      try {
+        responseBody = await response.json();
+      } catch {
+        // A stable fallback is shown below.
+      }
+
+      if (!response.ok) {
+        throw new Error(friendlyError(responseBody));
+      }
+      if (
+        typeof responseBody !== "object" ||
+        responseBody === null ||
+        typeof responseBody.text !== "string" ||
+        !responseBody.text.trim()
+      ) {
+        throw new Error("We couldn't read text from that file. Try a different file.");
+      }
+
+      insertTranscript(`“${file.name}”`, responseBody);
+    } catch (error) {
+      const messageText =
+        error instanceof Error && error.message
+          ? error.message
+          : "We couldn't read that file. Try a different file.";
+      setAttachmentStatus(messageText, "error");
+    } finally {
+      uploadInProgress = false;
+      elements.attachButton.disabled = requestInProgress;
+      elements.fileInput.value = "";
+    }
+  }
+
+  async function handleLink(linkUrl) {
+    if (requestInProgress || uploadInProgress) {
+      return;
+    }
+
+    uploadInProgress = true;
+    elements.attachButton.disabled = true;
+    setAttachmentStatus("Fetching the transcript from that link…", "working");
+
+    try {
+      const response = await fetch("/api/ingest-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: linkUrl }),
+      });
+
+      let responseBody = null;
+      try {
+        responseBody = await response.json();
+      } catch {
+        // A stable fallback is shown below.
+      }
+
+      if (!response.ok) {
+        throw new Error(friendlyError(responseBody));
+      }
+      if (
+        typeof responseBody !== "object" ||
+        responseBody === null ||
+        typeof responseBody.text !== "string" ||
+        !responseBody.text.trim()
+      ) {
+        throw new Error("We couldn't read a transcript from that link. Try another link.");
+      }
+
+      const label =
+        responseBody.source === "granola" ? "Granola notes" : "Fathom recording";
+      const title =
+        typeof responseBody.title === "string" && responseBody.title.trim()
+          ? `${label} — “${responseBody.title.trim()}”`
+          : label;
+      insertTranscript(title, responseBody);
+    } catch (error) {
+      const messageText =
+        error instanceof Error && error.message
+          ? error.message
+          : "We couldn't get the transcript from that link. Try again.";
+      setAttachmentStatus(messageText, "error");
+    } finally {
+      uploadInProgress = false;
+      elements.attachButton.disabled = requestInProgress;
+    }
   }
 
   async function sendMessage(rawMessage, showUserMessage) {
@@ -363,10 +753,10 @@
 
   function updateCharacterCount() {
     const length = elements.input.value.length;
-    elements.characterCount.textContent = `${length} / 4000`;
+    elements.characterCount.textContent = `${length.toLocaleString()} / ${MESSAGE_LIMIT.toLocaleString()}`;
     elements.characterCount.classList.toggle(
       "character-count--near-limit",
-      length >= 3_600,
+      length >= MESSAGE_LIMIT * 0.9,
     );
   }
 
@@ -377,12 +767,34 @@
 
   elements.form.addEventListener("submit", (event) => {
     event.preventDefault();
+    const link = supportedLinkIn(elements.input.value);
+    if (link) {
+      elements.input.value = "";
+      updateCharacterCount();
+      resizeInput();
+      void handleLink(link);
+      return;
+    }
     void sendMessage(elements.input.value, true);
   });
 
   elements.input.addEventListener("input", () => {
     updateCharacterCount();
     resizeInput();
+  });
+
+  elements.input.addEventListener("paste", (event) => {
+    if (requestInProgress || uploadInProgress) {
+      return;
+    }
+    const pasted = event.clipboardData
+      ? event.clipboardData.getData("text")
+      : "";
+    const link = supportedLinkIn(pasted);
+    if (link) {
+      event.preventDefault();
+      void handleLink(link);
+    }
   });
 
   elements.input.addEventListener("keydown", (event) => {
@@ -400,9 +812,51 @@
     sessionId = createSessionId();
     storeSession(sessionId);
     renderNewConversation();
+    setAttachmentStatus(null);
     elements.requestStatus.textContent = "New conversation started";
     elements.input.focus();
   });
+
+  elements.attachButton.addEventListener("click", () => {
+    if (!requestInProgress && !uploadInProgress) {
+      elements.fileInput.click();
+    }
+  });
+
+  elements.fileInput.addEventListener("change", () => {
+    const file = elements.fileInput.files && elements.fileInput.files[0];
+    if (file) {
+      void handleFileSelection(file);
+    }
+  });
+
+  const dropZone = document.querySelector(".chat-card");
+  if (dropZone) {
+    const stop = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    dropZone.addEventListener("dragenter", (event) => {
+      stop(event);
+      if (!requestInProgress && !uploadInProgress) {
+        dropZone.classList.add("chat-card--dragover");
+      }
+    });
+    dropZone.addEventListener("dragover", stop);
+    dropZone.addEventListener("dragleave", (event) => {
+      if (event.target === dropZone) {
+        dropZone.classList.remove("chat-card--dragover");
+      }
+    });
+    dropZone.addEventListener("drop", (event) => {
+      stop(event);
+      dropZone.classList.remove("chat-card--dragover");
+      const file = event.dataTransfer && event.dataTransfer.files[0];
+      if (file) {
+        void handleFileSelection(file);
+      }
+    });
+  }
 
   applyConfig();
   renderSuggestions();

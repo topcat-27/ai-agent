@@ -11,7 +11,7 @@ window.AGENT_CONFIG = Object.freeze({
   subtitle: "A calm co-pilot for turning ideas into next steps.",
   welcomeMessage:
     "Hello! I’m your project partner. Tell me what you’re working on, and we’ll turn it into clear, manageable next steps.",
-  primaryColour: "#6D4AFF",
+  primaryColour: "#1D3463",
   examplePrompts: [
     "Help me decide the three most important things to do today",
     "Turn my project idea into a one-week action plan",

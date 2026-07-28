@@ -9,9 +9,34 @@ import {
 } from "node:http";
 import { extname, resolve, sep } from "node:path";
 
-const MAX_MESSAGE_LENGTH = 4_000;
-const MAX_REQUEST_BYTES = 32_768;
+import {
+  ExtractionError,
+  UnsupportedFileError,
+  extensionFor,
+  extractTranscript,
+  isSupportedExtension,
+} from "./extract.js";
+import {
+  FetchError,
+  UnsupportedSourceError,
+  detectSource,
+  ingestUrl,
+} from "./ingest.js";
+
+// The message limit is large enough to carry a meeting transcript in one send,
+// so extracted transcripts (from files or links) reach the agent intact.
+const MAX_MESSAGE_LENGTH = 100_000;
+const MAX_REQUEST_BYTES = 1_048_576;
 const MAX_UPSTREAM_BYTES = 65_536;
+// Uploads are read as base64 JSON, which inflates the raw file by ~33%. The raw
+// file is capped at 10 MB; the JSON body is allowed a little more for overhead.
+const MAX_UPLOAD_FILE_BYTES = 10 * 1_024 * 1_024;
+const MAX_UPLOAD_BODY_BYTES = 15 * 1_024 * 1_024;
+// Extracted transcripts are capped at the message limit so an inserted
+// transcript never exceeds what a single send can carry.
+const MAX_TRANSCRIPT_LENGTH = MAX_MESSAGE_LENGTH;
+const MAX_FILENAME_LENGTH = 255;
+const MAX_URL_LENGTH = 2_048;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -36,9 +61,14 @@ type ErrorCode =
   | "AGENT_ERROR"
   | "AGENT_TIMEOUT"
   | "AGENT_UNAVAILABLE"
+  | "EXTRACTION_FAILED"
+  | "FETCH_FAILED"
+  | "FILE_TOO_LARGE"
   | "INVALID_REQUEST"
   | "MESSAGE_TOO_LONG"
-  | "RATE_LIMITED";
+  | "RATE_LIMITED"
+  | "UNSUPPORTED_FILE"
+  | "UNSUPPORTED_SOURCE";
 
 interface ChatRequest {
   sessionId: string;
@@ -184,6 +214,222 @@ function validateChatRequest(body: unknown): ChatRequest {
   }
 
   return { sessionId, message };
+}
+
+interface UploadInput {
+  filename: string;
+  buffer: Buffer;
+}
+
+interface UploadResponse {
+  filename: string;
+  characters: number;
+  truncated: boolean;
+  text: string;
+}
+
+async function readUploadBody(request: IncomingMessage): Promise<unknown> {
+  const contentType = request.headers["content-type"] ?? "";
+  if (!/^application\/json(?:\s*;|$)/i.test(contentType)) {
+    throw new PublicError(
+      400,
+      "INVALID_REQUEST",
+      "Send the file as JSON and try again.",
+    );
+  }
+
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+
+  for await (const rawChunk of request) {
+    const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+    totalBytes += chunk.length;
+    if (totalBytes > MAX_UPLOAD_BODY_BYTES) {
+      throw new PublicError(
+        413,
+        "FILE_TOO_LARGE",
+        "That file is too large. Choose a file under 10 MB.",
+      );
+    }
+    chunks.push(chunk);
+  }
+
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    throw new PublicError(
+      400,
+      "INVALID_REQUEST",
+      "That file could not be read. Try a different file.",
+    );
+  }
+}
+
+function validateUploadRequest(body: unknown): UploadInput {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new PublicError(
+      400,
+      "INVALID_REQUEST",
+      "Choose a file and try again.",
+    );
+  }
+
+  const candidate = body as Record<string, unknown>;
+  const filename =
+    typeof candidate.filename === "string" ? candidate.filename.trim() : "";
+
+  if (filename.length === 0 || filename.length > MAX_FILENAME_LENGTH) {
+    throw new PublicError(
+      400,
+      "INVALID_REQUEST",
+      "Choose a file and try again.",
+    );
+  }
+
+  if (!isSupportedExtension(extensionFor(filename))) {
+    throw new PublicError(
+      415,
+      "UNSUPPORTED_FILE",
+      "That file type is not supported. Upload a PDF, Word (.docx), text, or Markdown file.",
+    );
+  }
+
+  const dataBase64 =
+    typeof candidate.dataBase64 === "string" ? candidate.dataBase64 : "";
+  if (dataBase64.length === 0) {
+    throw new PublicError(
+      400,
+      "INVALID_REQUEST",
+      "That file was empty. Choose another file.",
+    );
+  }
+
+  const buffer = Buffer.from(dataBase64, "base64");
+  if (buffer.length === 0) {
+    throw new PublicError(
+      400,
+      "INVALID_REQUEST",
+      "That file was empty. Choose another file.",
+    );
+  }
+
+  if (buffer.length > MAX_UPLOAD_FILE_BYTES) {
+    throw new PublicError(
+      413,
+      "FILE_TOO_LARGE",
+      "That file is too large. Choose a file under 10 MB.",
+    );
+  }
+
+  return { filename, buffer };
+}
+
+async function buildTranscript(input: UploadInput): Promise<UploadResponse> {
+  let transcript: string;
+  try {
+    transcript = await extractTranscript(input.filename, input.buffer);
+  } catch (error) {
+    if (error instanceof UnsupportedFileError) {
+      throw new PublicError(
+        415,
+        "UNSUPPORTED_FILE",
+        "That file type is not supported. Upload a PDF, Word (.docx), text, or Markdown file.",
+      );
+    }
+    if (error instanceof ExtractionError) {
+      throw new PublicError(
+        422,
+        "EXTRACTION_FAILED",
+        "We couldn't read text from that file. Scanned or password-protected PDFs are not supported — try a text-based PDF or a .docx.",
+      );
+    }
+    throw error;
+  }
+
+  if (transcript.length === 0) {
+    throw new PublicError(
+      422,
+      "EXTRACTION_FAILED",
+      "We couldn't find any text in that file. It may contain only scanned images. Try a text-based file.",
+    );
+  }
+
+  const truncated = transcript.length > MAX_TRANSCRIPT_LENGTH;
+  const text = truncated
+    ? transcript.slice(0, MAX_TRANSCRIPT_LENGTH)
+    : transcript;
+
+  return {
+    filename: input.filename,
+    characters: text.length,
+    truncated,
+    text,
+  };
+}
+
+interface IngestResponse {
+  source: string;
+  title: string;
+  characters: number;
+  truncated: boolean;
+  text: string;
+}
+
+function validateIngestRequest(body: unknown): string {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new PublicError(400, "INVALID_REQUEST", "Paste a link and try again.");
+  }
+
+  const candidate = body as Record<string, unknown>;
+  const url = typeof candidate.url === "string" ? candidate.url.trim() : "";
+
+  if (url.length === 0 || url.length > MAX_URL_LENGTH) {
+    throw new PublicError(400, "INVALID_REQUEST", "Paste a link and try again.");
+  }
+
+  if (detectSource(url) === null) {
+    throw new PublicError(
+      415,
+      "UNSUPPORTED_SOURCE",
+      "That link is not supported. Paste a Fathom share link or a Granola notes link.",
+    );
+  }
+
+  return url;
+}
+
+async function buildIngestResponse(
+  url: string,
+  fetchImplementation: typeof fetch,
+  timeoutMs: number,
+): Promise<IngestResponse> {
+  let result;
+  try {
+    result = await ingestUrl(url, { fetchImplementation, timeoutMs });
+  } catch (error) {
+    if (error instanceof UnsupportedSourceError) {
+      throw new PublicError(415, "UNSUPPORTED_SOURCE", error.message);
+    }
+    if (error instanceof FetchError) {
+      throw new PublicError(
+        502,
+        "FETCH_FAILED",
+        "We couldn't get the transcript from that link. Check that it is shared and try again.",
+      );
+    }
+    throw error;
+  }
+
+  const truncated = result.text.length > MAX_TRANSCRIPT_LENGTH;
+  const text = truncated ? result.text.slice(0, MAX_TRANSCRIPT_LENGTH) : result.text;
+
+  return {
+    source: result.source,
+    title: result.title,
+    characters: text.length,
+    truncated,
+    text,
+  };
 }
 
 async function readUpstreamBody(response: Response): Promise<unknown> {
@@ -416,6 +662,78 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
               502,
               "AGENT_ERROR",
               "The agent could not complete that request. Check the n8n workflow and try again.",
+            ),
+          );
+        }
+        return;
+      }
+
+      if (url.pathname === "/api/upload") {
+        if (request.method !== "POST") {
+          sendJson(response, 405, {
+            error: {
+              code: "INVALID_REQUEST",
+              message: "Send files with POST.",
+            },
+          }, { Allow: "POST" });
+          return;
+        }
+
+        try {
+          const body = await readUploadBody(request);
+          const uploadInput = validateUploadRequest(body);
+          const transcript = await buildTranscript(uploadInput);
+          sendJson(response, 200, transcript);
+        } catch (error) {
+          if (error instanceof PublicError) {
+            sendError(response, error);
+            return;
+          }
+          options.logError?.("Unexpected file upload error", error);
+          sendError(
+            response,
+            new PublicError(
+              500,
+              "EXTRACTION_FAILED",
+              "We couldn't process that file. Try again.",
+            ),
+          );
+        }
+        return;
+      }
+
+      if (url.pathname === "/api/ingest-url") {
+        if (request.method !== "POST") {
+          sendJson(response, 405, {
+            error: {
+              code: "INVALID_REQUEST",
+              message: "Send links with POST.",
+            },
+          }, { Allow: "POST" });
+          return;
+        }
+
+        try {
+          const body = await readRequestBody(request);
+          const linkUrl = validateIngestRequest(body);
+          const ingest = await buildIngestResponse(
+            linkUrl,
+            fetchImplementation,
+            timeoutMs,
+          );
+          sendJson(response, 200, ingest);
+        } catch (error) {
+          if (error instanceof PublicError) {
+            sendError(response, error);
+            return;
+          }
+          options.logError?.("Unexpected link ingest error", error);
+          sendError(
+            response,
+            new PublicError(
+              502,
+              "FETCH_FAILED",
+              "We couldn't get the transcript from that link. Try again.",
             ),
           );
         }

@@ -1,17 +1,18 @@
 :root {
-  --brand-primary: #6d4aff;
-  --ink: #211d31;
-  --muted: #686378;
-  --line: #e7e3ee;
-  --panel: #f2efff;
+  --brand-primary: #1d3463;
+  --brand-accent: #ffb97b;
+  --ink: #0f172a;
+  --muted: #5a6478;
+  --line: #e3e7ef;
+  --panel: #eef1f7;
   --surface: #ffffff;
-  --warm-white: #faf9fc;
+  --warm-white: #fafbfd;
   color-scheme: light;
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
   color: var(--ink);
-  background: #e9e6f0;
+  background: #e7eaf1;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -31,9 +32,9 @@ body {
   min-height: 100dvh;
   margin: 0;
   background:
-    radial-gradient(circle at 9% 8%, rgb(109 74 255 / 16%), transparent 24rem),
-    radial-gradient(circle at 92% 90%, rgb(248 174 103 / 13%), transparent 28rem),
-    #efedf3;
+    radial-gradient(circle at 9% 8%, rgb(29 52 99 / 14%), transparent 24rem),
+    radial-gradient(circle at 92% 90%, rgb(255 185 123 / 22%), transparent 28rem),
+    #eef0f4;
 }
 
 button,
@@ -386,6 +387,121 @@ textarea:focus-visible,
   box-shadow: 0 0.45rem 1rem color-mix(in srgb, var(--brand-primary) 14%, transparent);
 }
 
+/* Rendered Markdown in agent replies. */
+.message__copy--rich {
+  white-space: normal;
+}
+
+.message__copy--rich > *:first-child {
+  margin-top: 0;
+}
+
+.message__copy--rich > *:last-child {
+  margin-bottom: 0;
+}
+
+.message__copy--rich p {
+  margin: 0 0 0.7rem;
+}
+
+.message__copy--rich h1,
+.message__copy--rich h2,
+.message__copy--rich h3,
+.message__copy--rich h4,
+.message__copy--rich h5,
+.message__copy--rich h6 {
+  margin: 1rem 0 0.5rem;
+  font-weight: 800;
+  line-height: 1.3;
+}
+
+.message__copy--rich h1 {
+  font-size: 1.1rem;
+}
+
+.message__copy--rich h2 {
+  font-size: 1.02rem;
+}
+
+.message__copy--rich h3,
+.message__copy--rich h4,
+.message__copy--rich h5,
+.message__copy--rich h6 {
+  font-size: 0.95rem;
+}
+
+.message__copy--rich ul,
+.message__copy--rich ol {
+  margin: 0 0 0.7rem;
+  padding-left: 1.3rem;
+}
+
+.message__copy--rich li {
+  margin: 0.15rem 0;
+}
+
+.message__copy--rich blockquote {
+  margin: 0 0 0.7rem;
+  padding: 0.1rem 0.9rem;
+  border-left: 3px solid var(--line);
+  color: #6f6a78;
+}
+
+.message__copy--rich code {
+  padding: 0.1rem 0.3rem;
+  border-radius: 0.3rem;
+  background: color-mix(in srgb, var(--brand-primary) 8%, #f2f0f6);
+  font-size: 0.85em;
+}
+
+.message__copy--rich pre {
+  margin: 0 0 0.7rem;
+  padding: 0.75rem 0.9rem;
+  overflow-x: auto;
+  border-radius: 0.6rem;
+  background: #f2f0f6;
+}
+
+.message__copy--rich pre code {
+  padding: 0;
+  background: none;
+  white-space: pre;
+}
+
+.message__copy--rich hr {
+  margin: 0.9rem 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.message__copy--rich a {
+  color: var(--brand-primary);
+  text-decoration: underline;
+}
+
+.message__table-wrap,
+.message__copy--rich table {
+  display: block;
+  max-width: 100%;
+  margin: 0 0 0.7rem;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.message__copy--rich th,
+.message__copy--rich td {
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.message__copy--rich th {
+  background: color-mix(in srgb, var(--brand-primary) 6%, #f7f6fa);
+  font-weight: 700;
+}
+
 .thinking-dots {
   display: inline-flex;
   min-width: 4rem;
@@ -587,6 +703,71 @@ textarea:disabled {
   font-weight: 800;
 }
 
+.attach-button {
+  display: inline-flex;
+  width: 3.35rem;
+  min-width: 3.35rem;
+  min-height: 3.35rem;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid #dcd7e4;
+  border-radius: 0.85rem;
+  background: var(--surface);
+  color: #6f6a78;
+  cursor: pointer;
+  transition:
+    border-color 150ms ease,
+    color 150ms ease,
+    background 150ms ease;
+}
+
+.attach-button svg {
+  width: 1.2rem;
+  height: 1.2rem;
+}
+
+.attach-button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--brand-primary) 52%, #dcd7e4);
+  color: var(--brand-primary);
+  background: color-mix(in srgb, var(--brand-primary) 6%, var(--surface));
+}
+
+.attach-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.attachment-status {
+  width: 100%;
+  max-width: 43rem;
+  margin: 0 auto 0.55rem;
+  padding: 0.6rem 0.8rem;
+  border-radius: 0.7rem;
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.attachment-status--working {
+  background: color-mix(in srgb, var(--brand-primary) 8%, transparent);
+  color: color-mix(in srgb, var(--brand-primary) 70%, var(--ink));
+}
+
+.attachment-status--success {
+  background: #eaf6ee;
+  color: #216a3a;
+}
+
+.attachment-status--error {
+  background: #fbeaea;
+  color: #a2373b;
+}
+
+.chat-card--dragover {
+  outline: 2px dashed var(--brand-primary);
+  outline-offset: -6px;
+}
+
 .send-button {
   display: inline-flex;
   min-width: 6.3rem;
@@ -778,6 +959,12 @@ textarea:disabled {
     min-width: 3rem;
     min-height: 3rem;
     padding: 0;
+  }
+
+  .attach-button {
+    width: 3rem;
+    min-width: 3rem;
+    min-height: 3rem;
   }
 
   .send-button span {

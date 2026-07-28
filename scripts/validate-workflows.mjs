@@ -173,8 +173,8 @@ if (agentWorkflow) {
   check(validation?.type === "n8n-nodes-base.code", "Validation: wrong node type");
   check(/\.trim\(\)/.test(validationCode), "Validation: message must be trimmed");
   check(
-    /message\.length > 4000/.test(validationCode),
-    "Validation: 4,000-character limit is missing",
+    /message\.length > 100000/.test(validationCode),
+    "Validation: 100,000-character limit is missing",
   );
   check(
     /uuidPattern\.test\(sessionId\)/.test(validationCode),

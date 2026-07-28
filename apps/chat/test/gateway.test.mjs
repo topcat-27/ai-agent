@@ -151,7 +151,7 @@ test("invalid requests never reach the upstream agent", async (t) => {
     },
     {
       name: "oversized message",
-      body: { sessionId: SESSION_ID, message: "x".repeat(4_001) },
+      body: { sessionId: SESSION_ID, message: "x".repeat(100_001) },
       status: 413,
       code: "MESSAGE_TOO_LONG",
     },
@@ -359,6 +359,218 @@ test("rate limiting uses the stable error contract", async (t) => {
   assert.equal(response.status, 429);
   assert.equal(response.headers.get("retry-after"), "30");
   assert.equal((await response.json()).error.code, "RATE_LIMITED");
+});
+
+async function upload(url, body, headers = { "Content-Type": "application/json" }) {
+  return fetch(`${url}/api/upload`, {
+    method: "POST",
+    headers,
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  });
+}
+
+function base64(text) {
+  return Buffer.from(text, "utf8").toString("base64");
+}
+
+test("a plain-text upload is extracted, normalised, and never reaches n8n", async (t) => {
+  let upstreamCalls = 0;
+  const upstreamUrl = await startUpstream(t, (_request, response) => {
+    upstreamCalls += 1;
+    response.writeHead(500);
+    response.end();
+  });
+  const gatewayUrl = await startGateway(t, { upstreamUrl });
+
+  const response = await upload(gatewayUrl, {
+    filename: "notes.txt",
+    dataBase64: base64("Line one\r\n\r\n\r\nLine two   spaced\r\n"),
+  });
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.filename, "notes.txt");
+  assert.equal(body.truncated, false);
+  assert.equal(body.text, "Line one\n\nLine two spaced");
+  assert.equal(body.characters, body.text.length);
+  assert.equal(upstreamCalls, 0);
+});
+
+test("uploads are validated with the safe error contract", async (t) => {
+  const gatewayUrl = await startGateway(t, {
+    upstreamUrl: "http://127.0.0.1:1/webhook/chat",
+  });
+
+  const cases = [
+    { name: "non-object", body: [], status: 400, code: "INVALID_REQUEST" },
+    {
+      name: "missing filename",
+      body: { dataBase64: base64("hi") },
+      status: 400,
+      code: "INVALID_REQUEST",
+    },
+    {
+      name: "unsupported type",
+      body: { filename: "malware.exe", dataBase64: base64("hi") },
+      status: 415,
+      code: "UNSUPPORTED_FILE",
+    },
+    {
+      name: "empty data",
+      body: { filename: "notes.txt", dataBase64: "" },
+      status: 400,
+      code: "INVALID_REQUEST",
+    },
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      const response = await upload(gatewayUrl, item.body);
+      const body = await response.json();
+      assert.equal(response.status, item.status);
+      assert.equal(body.error.code, item.code);
+    });
+  }
+
+  const wrongContentType = await upload(
+    gatewayUrl,
+    JSON.stringify({ filename: "notes.txt", dataBase64: base64("hi") }),
+    { "Content-Type": "text/plain" },
+  );
+  assert.equal(wrongContentType.status, 400);
+  assert.equal((await wrongContentType.json()).error.code, "INVALID_REQUEST");
+
+  const wrongMethod = await fetch(`${gatewayUrl}/api/upload`);
+  assert.equal(wrongMethod.status, 405);
+  assert.equal(wrongMethod.headers.get("allow"), "POST");
+});
+
+test("an oversized upload is rejected before extraction", async (t) => {
+  const gatewayUrl = await startGateway(t, {
+    upstreamUrl: "http://127.0.0.1:1/webhook/chat",
+  });
+
+  const response = await upload(gatewayUrl, {
+    filename: "huge.txt",
+    dataBase64: "A".repeat(16 * 1024 * 1024),
+  });
+
+  assert.equal(response.status, 413);
+  assert.equal((await response.json()).error.code, "FILE_TOO_LARGE");
+});
+
+test("a supported file with no readable text reports EXTRACTION_FAILED", async (t) => {
+  const gatewayUrl = await startGateway(t, {
+    upstreamUrl: "http://127.0.0.1:1/webhook/chat",
+  });
+
+  const response = await upload(gatewayUrl, {
+    filename: "empty.txt",
+    dataBase64: base64("   \n\n  "),
+  });
+
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, "EXTRACTION_FAILED");
+});
+
+async function ingest(url, body, headers = { "Content-Type": "application/json" }) {
+  return fetch(`${url}/api/ingest-url`, {
+    method: "POST",
+    headers,
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  });
+}
+
+test("a Fathom share link is fetched, parsed, and returned as text", async (t) => {
+  const fetchImplementation = (input) => {
+    const target = String(input);
+    if (target.includes("/share/")) {
+      return Promise.resolve(
+        new Response(
+          "<div data-page='/calls/999/copy_transcript?token=TESTTOKEN'></div>",
+          { status: 200 },
+        ),
+      );
+    }
+    if (target.includes("/copy_transcript")) {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            html: "<h1>Weekly Sync</h1><p>@0:01 - Alice</p><p>We shipped the feature.</p>",
+          }),
+          { status: 200 },
+        ),
+      );
+    }
+    return Promise.resolve(new Response("nope", { status: 404 }));
+  };
+
+  const gatewayUrl = await startGateway(t, {
+    upstreamUrl: "http://127.0.0.1:1/webhook/chat",
+    fetchImplementation,
+  });
+
+  const response = await ingest(gatewayUrl, {
+    url: "https://fathom.video/share/abc123",
+  });
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.source, "fathom");
+  assert.equal(body.title, "Weekly Sync");
+  assert.match(body.text, /Alice/);
+  assert.match(body.text, /We shipped the feature\./);
+  assert.equal(body.characters, body.text.length);
+});
+
+test("only allowlisted link hosts are accepted", async (t) => {
+  let externalCalls = 0;
+  const fetchImplementation = () => {
+    externalCalls += 1;
+    return Promise.resolve(new Response("should not be called", { status: 200 }));
+  };
+  const gatewayUrl = await startGateway(t, {
+    upstreamUrl: "http://127.0.0.1:1/webhook/chat",
+    fetchImplementation,
+  });
+
+  const cases = [
+    { name: "non-object", body: [], status: 400, code: "INVALID_REQUEST" },
+    { name: "missing url", body: {}, status: 400, code: "INVALID_REQUEST" },
+    {
+      name: "unsupported host",
+      body: { url: "https://example.com/evil" },
+      status: 415,
+      code: "UNSUPPORTED_SOURCE",
+    },
+    {
+      name: "internal SSRF target",
+      body: { url: "http://127.0.0.1:5678/rest/settings" },
+      status: 415,
+      code: "UNSUPPORTED_SOURCE",
+    },
+    {
+      name: "fathom non-share path",
+      body: { url: "https://fathom.video/calls/123" },
+      status: 415,
+      code: "UNSUPPORTED_SOURCE",
+    },
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      const response = await ingest(gatewayUrl, item.body);
+      const body = await response.json();
+      assert.equal(response.status, item.status);
+      assert.equal(body.error.code, item.code);
+    });
+  }
+
+  assert.equal(externalCalls, 0);
+
+  const wrongMethod = await fetch(`${gatewayUrl}/api/ingest-url`);
+  assert.equal(wrongMethod.status, 405);
+  assert.equal(wrongMethod.headers.get("allow"), "POST");
 });
 
 test("static files are served safely", async (t) => {
