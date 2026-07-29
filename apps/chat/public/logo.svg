@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 100" role="img" aria-label="PitchUp">
+  <title>PitchUp</title>
+  <path
+    d="M62 5
+       C 90 5, 113 19, 116 44
+       C 119 69, 95 95, 61 95
+       C 33 95, 11 81, 5 57
+       C -1 32, 28 5, 62 5 Z"
+    fill="#3c4358"
+    stroke="#f5b46a"
+    stroke-width="5"
+    stroke-linejoin="round"
+  />
+  <text
+    x="60"
+    y="52"
+    text-anchor="middle"
+    dominant-baseline="central"
+    fill="#ffffff"
+    font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif"
+    font-size="62"
+    font-weight="700"
+  >P</text>
+</svg>

@@ -2,11 +2,11 @@
   "use strict";
 
   const DEFAULT_CONFIG = {
-    name: "Project Partner",
+    name: "Pitchy",
     subtitle: "A calm co-pilot for turning ideas into next steps.",
     welcomeMessage:
-      "Hello! I’m your project partner. Tell me what you’re working on, and we’ll turn it into clear, manageable next steps.",
-    primaryColour: "#6D4AFF",
+      "Hi, I’m Pitchy. Tell me what you’re working on — or paste a meeting link — and we’ll turn it into clear next steps.",
+    primaryColour: "#1D3463",
     examplePrompts: [
       "Help me decide the three most important things to do today",
       "Turn my project idea into a one-week action plan",
@@ -44,7 +44,6 @@
   }
 
   const elements = {
-    agentInitials: document.querySelector("#agent-initials"),
     agentName: document.querySelector("#agent-name"),
     agentSubtitle: document.querySelector("#agent-subtitle"),
     attachButton: document.querySelector("#attach-button"),
@@ -55,7 +54,6 @@
     fileInput: document.querySelector("#file-input"),
     form: document.querySelector("#chat-form"),
     input: document.querySelector("#message-input"),
-    mobileAgentInitials: document.querySelector("#mobile-agent-initials"),
     requestStatus: document.querySelector("#request-status"),
     resetButton: document.querySelector("#reset-button"),
     sendButton: document.querySelector("#send-button"),
@@ -114,15 +112,6 @@
 
   const config = loadConfig();
 
-  function getInitials(name) {
-    return name
-      .split(/\s+/)
-      .slice(0, 2)
-      .map((part) => part.charAt(0))
-      .join("")
-      .toUpperCase();
-  }
-
   function createSessionId() {
     return window.crypto.randomUUID();
   }
@@ -165,9 +154,6 @@
     elements.agentSubtitle.textContent = config.subtitle;
     elements.conversationAgentName.textContent = config.name;
 
-    const initials = getInitials(config.name);
-    elements.agentInitials.textContent = initials;
-    elements.mobileAgentInitials.textContent = initials;
     elements.input.setAttribute("aria-label", `Message ${config.name}`);
   }
 
@@ -185,7 +171,15 @@
     const avatar = document.createElement("span");
     avatar.className = `message__avatar message__avatar--${kind}`;
     avatar.setAttribute("aria-hidden", "true");
-    avatar.textContent = kind === "agent" ? getInitials(config.name) : "You";
+    if (kind === "agent") {
+      const logo = document.createElement("img");
+      logo.className = "brand__logo";
+      logo.src = "/logo.svg";
+      logo.alt = "";
+      avatar.append(logo);
+    } else {
+      avatar.textContent = "You";
+    }
     return avatar;
   }
 
@@ -366,6 +360,322 @@
     return html.join("\n");
   }
 
+  // --- Asana review panel ------------------------------------------------
+  // The agent proposes tasks inside an ```asana-tasks fenced block. Nothing is
+  // sent to Asana until a person edits the list and presses "Push to Asana".
+  let asanaMetaPromise = null;
+
+  function loadAsanaMeta() {
+    if (!asanaMetaPromise) {
+      asanaMetaPromise = fetch("/api/asana/meta")
+        .then(async (response) => {
+          const body = await response.json().catch(() => null);
+          if (!response.ok) {
+            throw new Error(friendlyError(body));
+          }
+          return {
+            projects: Array.isArray(body?.projects) ? body.projects : [],
+            members: Array.isArray(body?.members) ? body.members : [],
+            defaultProjectGid: body?.defaultProjectGid ?? "",
+          };
+        })
+        .catch((error) => {
+          asanaMetaPromise = null;
+          throw error;
+        });
+    }
+    return asanaMetaPromise;
+  }
+
+  /** Pulls the proposal block out of a reply, returning it and the prose. */
+  function extractAsanaProposal(text) {
+    const fence = /```asana-tasks\s*\n([\s\S]*?)```/;
+    const match = fence.exec(text);
+    if (!match) {
+      return { proposal: null, prose: text };
+    }
+    let proposal = null;
+    try {
+      const parsed = JSON.parse(match[1]);
+      const tasks = Array.isArray(parsed?.tasks) ? parsed.tasks : [];
+      if (tasks.length > 0) {
+        proposal = {
+          meetingTitle:
+            typeof parsed.meetingTitle === "string" ? parsed.meetingTitle.trim() : "",
+          tasks: tasks
+            .filter((task) => task && typeof task.title === "string" && task.title.trim())
+            .slice(0, 50)
+            .map((task) => ({
+              title: String(task.title).trim(),
+              notes: typeof task.notes === "string" ? task.notes.trim() : "",
+              assigneeName:
+                typeof task.assigneeName === "string" ? task.assigneeName.trim() : "",
+              dueOn:
+                typeof task.dueOn === "string" && /^\d{4}-\d{2}-\d{2}$/.test(task.dueOn.trim())
+                  ? task.dueOn.trim()
+                  : "",
+            })),
+        };
+      }
+    } catch {
+      proposal = null;
+    }
+    return { proposal, prose: text.replace(fence, "").trim() };
+  }
+
+  /**
+   * Matches a name from the transcript to a workspace member, but only when the
+   * match is unambiguous. Anything else stays unassigned — we never guess owners.
+   */
+  function matchMember(name, members) {
+    const wanted = name.trim().toLowerCase();
+    if (!wanted) {
+      return "";
+    }
+    const exact = members.filter((member) => member.name.trim().toLowerCase() === wanted);
+    if (exact.length === 1) {
+      return exact[0].gid;
+    }
+    const firstWord = wanted.split(/\s+/)[0];
+    const byFirstName = members.filter((member) => {
+      const memberFirst = member.name.trim().toLowerCase().split(/\s+/)[0];
+      const emailLocal = (member.email || "").split("@")[0].toLowerCase();
+      return memberFirst === firstWord || emailLocal.startsWith(`${firstWord}.`);
+    });
+    return byFirstName.length === 1 ? byFirstName[0].gid : "";
+  }
+
+  function labelled(labelText, control) {
+    const wrap = document.createElement("label");
+    wrap.className = "asana-field";
+    const span = document.createElement("span");
+    span.className = "asana-field__label";
+    span.textContent = labelText;
+    wrap.append(span, control);
+    return wrap;
+  }
+
+  function buildSelect(options, selectedValue, placeholder) {
+    const select = document.createElement("select");
+    select.className = "asana-input";
+    if (placeholder !== undefined) {
+      const blank = document.createElement("option");
+      blank.value = "";
+      blank.textContent = placeholder;
+      select.append(blank);
+    }
+    for (const option of options) {
+      const element = document.createElement("option");
+      element.value = option.gid;
+      element.textContent = option.name;
+      if (option.gid === selectedValue) {
+        element.selected = true;
+      }
+      select.append(element);
+    }
+    return select;
+  }
+
+  function renderAsanaPanel(proposal) {
+    const panel = document.createElement("section");
+    panel.className = "asana-panel";
+    panel.setAttribute("aria-label", "Review tasks before pushing to Asana");
+
+    const header = document.createElement("div");
+    header.className = "asana-panel__header";
+    const heading = document.createElement("p");
+    heading.className = "asana-panel__title";
+    heading.textContent = `Review ${proposal.tasks.length} task${proposal.tasks.length === 1 ? "" : "s"} before pushing to Asana`;
+    header.append(heading);
+
+    const status = document.createElement("p");
+    status.className = "asana-panel__status";
+    status.textContent = "Loading your Asana projects…";
+
+    const controls = document.createElement("div");
+    controls.className = "asana-controls";
+    const list = document.createElement("div");
+    list.className = "asana-list";
+
+    const footer = document.createElement("div");
+    footer.className = "asana-panel__footer";
+    const pushButton = document.createElement("button");
+    pushButton.type = "button";
+    pushButton.className = "asana-push";
+    pushButton.textContent = "Push to Asana";
+    pushButton.disabled = true;
+    footer.append(pushButton);
+
+    panel.append(header, status, controls, list, footer);
+
+    loadAsanaMeta()
+      .then((meta) => {
+        status.textContent = "";
+        status.hidden = true;
+
+        const projectSelect = buildSelect(meta.projects, meta.defaultProjectGid);
+        const structureSelect = document.createElement("select");
+        structureSelect.className = "asana-input";
+        for (const option of [
+          { value: "flat", label: "Separate tasks" },
+          { value: "grouped", label: "Subtasks under one parent" },
+        ]) {
+          const element = document.createElement("option");
+          element.value = option.value;
+          element.textContent = option.label;
+          structureSelect.append(element);
+        }
+        controls.append(
+          labelled("Project", projectSelect),
+          labelled("Structure", structureSelect),
+        );
+
+        const rows = proposal.tasks.map((task) => {
+          const card = document.createElement("div");
+          card.className = "asana-card";
+
+          const include = document.createElement("input");
+          include.type = "checkbox";
+          include.checked = true;
+          include.className = "asana-card__include";
+          include.setAttribute("aria-label", `Include "${task.title}"`);
+
+          const title = document.createElement("input");
+          title.type = "text";
+          title.className = "asana-input asana-input--title";
+          title.value = task.title;
+
+          const notes = document.createElement("textarea");
+          notes.className = "asana-input asana-input--notes";
+          notes.rows = 2;
+          notes.value = task.notes;
+
+          const assignee = buildSelect(
+            meta.members,
+            matchMember(task.assigneeName, meta.members),
+            "Unassigned",
+          );
+
+          const due = document.createElement("input");
+          due.type = "date";
+          due.className = "asana-input";
+          due.value = task.dueOn;
+
+          const body = document.createElement("div");
+          body.className = "asana-card__body";
+          body.append(
+            title,
+            notes,
+            (() => {
+              const row = document.createElement("div");
+              row.className = "asana-card__meta";
+              row.append(labelled("Assignee", assignee), labelled("Due date", due));
+              return row;
+            })(),
+          );
+
+          card.append(include, body);
+          list.append(card);
+          return { include, title, notes, assignee, due };
+        });
+
+        const refreshButton = () => {
+          const selected = rows.filter((row) => row.include.checked).length;
+          pushButton.disabled = selected === 0;
+          pushButton.textContent =
+            selected === 0 ? "Select a task" : `Push ${selected} to Asana`;
+        };
+        for (const row of rows) {
+          row.include.addEventListener("change", refreshButton);
+        }
+        refreshButton();
+
+        pushButton.addEventListener("click", async () => {
+          const selected = rows.filter((row) => row.include.checked);
+          if (selected.length === 0) {
+            return;
+          }
+          pushButton.disabled = true;
+          pushButton.textContent = "Pushing…";
+          status.hidden = false;
+          status.className = "asana-panel__status";
+          status.textContent = "Creating tasks in Asana…";
+
+          try {
+            const response = await fetch("/api/asana/create", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                mode: structureSelect.value,
+                projectGid: projectSelect.value,
+                meetingTitle: proposal.meetingTitle,
+                tasks: selected.map((row) => ({
+                  title: row.title.value,
+                  notes: row.notes.value,
+                  assigneeGid: row.assignee.value,
+                  dueOn: row.due.value,
+                })),
+              }),
+            });
+            const body = await response.json().catch(() => null);
+            if (!response.ok) {
+              throw new Error(friendlyError(body));
+            }
+
+            const created = Array.isArray(body?.created) ? body.created : [];
+            panel.classList.add("asana-panel--done");
+            controls.remove();
+            list.remove();
+            footer.remove();
+            status.className = "asana-panel__status asana-panel__status--success";
+            status.textContent = body?.parent?.gid
+              ? `Created ${created.length} subtask${created.length === 1 ? "" : "s"} under “${body.parent.name}” in Asana.`
+              : `Created ${created.length} task${created.length === 1 ? "" : "s"} in Asana.`;
+
+            const links = document.createElement("ul");
+            links.className = "asana-results";
+            const rendered = body?.parent?.gid ? [body.parent, ...created] : created;
+            for (const task of rendered) {
+              const item = document.createElement("li");
+              if (task.url) {
+                const anchor = document.createElement("a");
+                anchor.href = task.url;
+                anchor.target = "_blank";
+                anchor.rel = "noopener noreferrer";
+                anchor.textContent = task.name || "View task";
+                item.append(anchor);
+              } else {
+                item.textContent = task.name || "Task created";
+              }
+              links.append(item);
+            }
+            panel.append(links);
+            scrollConversation();
+          } catch (error) {
+            status.hidden = false;
+            status.className = "asana-panel__status asana-panel__status--error";
+            status.textContent =
+              error instanceof Error && error.message
+                ? error.message
+                : "Could not push those tasks. Try again.";
+            pushButton.disabled = false;
+            refreshButton();
+          }
+        });
+
+        scrollConversation();
+      })
+      .catch((error) => {
+        status.className = "asana-panel__status asana-panel__status--error";
+        status.textContent =
+          error instanceof Error && error.message
+            ? error.message
+            : "Could not load your Asana projects.";
+      });
+
+    return panel;
+  }
+
   function addMessage(kind, text) {
     const wrapper = document.createElement("article");
     wrapper.className = `message message--${kind}`;
@@ -378,10 +688,15 @@
     label.textContent = kind === "agent" ? config.name : "You";
 
     let copy;
+    let proposal = null;
     if (kind === "agent") {
+      const extracted = extractAsanaProposal(text);
+      proposal = extracted.proposal;
       copy = document.createElement("div");
       copy.className = "message__copy message__copy--rich";
-      copy.innerHTML = markdownToHtml(text);
+      copy.innerHTML = markdownToHtml(
+        extracted.prose || "Here are the tasks I found. Review them before pushing.",
+      );
     } else {
       copy = document.createElement("p");
       copy.className = "message__copy";
@@ -389,6 +704,9 @@
     }
 
     body.append(label, copy);
+    if (proposal) {
+      body.append(renderAsanaPanel(proposal));
+    }
     wrapper.append(createAvatar(kind), body);
     elements.conversation.append(wrapper);
     scrollConversation();

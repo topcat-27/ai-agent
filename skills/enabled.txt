@@ -2,3 +2,4 @@
 project-assistant
 task-capture
 weekly-status
+asana-capture

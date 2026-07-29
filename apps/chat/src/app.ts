@@ -65,6 +65,8 @@ type ErrorCode =
   | "FETCH_FAILED"
   | "FILE_TOO_LARGE"
   | "INVALID_REQUEST"
+  | "ASANA_ERROR"
+  | "ASANA_UNAVAILABLE"
   | "MESSAGE_TOO_LONG"
   | "RATE_LIMITED"
   | "UNSUPPORTED_FILE"
@@ -84,6 +86,10 @@ interface ChatResponse {
 export interface ChatGatewayOptions {
   publicDirectory: string;
   upstreamUrl: string;
+  /** n8n webhook returning Asana projects and workspace members (read-only). */
+  asanaLookupsUrl?: string;
+  /** n8n webhook that creates Asana tasks after a person approves them. */
+  asanaCreateUrl?: string;
   timeoutMs?: number;
   fetchImplementation?: typeof fetch;
   logError?: (message: string, error?: unknown) => void;
@@ -432,6 +438,152 @@ async function buildIngestResponse(
   };
 }
 
+const MAX_ASANA_TASKS = 50;
+const GID_PATTERN = /^\d+$/;
+const DUE_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+interface AsanaCreatePayload {
+  mode: "flat" | "grouped";
+  projectGid: string;
+  meetingTitle: string;
+  tasks: {
+    title: string;
+    notes: string;
+    assigneeGid: string;
+    dueOn: string;
+  }[];
+}
+
+/**
+ * Validates the review panel's push request before it reaches n8n. The n8n
+ * workflow re-validates everything; this layer exists to reject obvious
+ * mistakes with a friendly message and to keep malformed input off the wire.
+ */
+function validateAsanaCreateRequest(body: unknown): AsanaCreatePayload {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new PublicError(400, "INVALID_REQUEST", "Nothing to push. Select at least one task.");
+  }
+
+  const candidate = body as Record<string, unknown>;
+  const projectGid =
+    typeof candidate.projectGid === "string" ? candidate.projectGid.trim() : "";
+  if (!GID_PATTERN.test(projectGid)) {
+    throw new PublicError(400, "INVALID_REQUEST", "Choose an Asana project before pushing.");
+  }
+
+  const rawTasks = Array.isArray(candidate.tasks) ? candidate.tasks : [];
+  if (rawTasks.length === 0) {
+    throw new PublicError(400, "INVALID_REQUEST", "Select at least one task to push.");
+  }
+  if (rawTasks.length > MAX_ASANA_TASKS) {
+    throw new PublicError(
+      400,
+      "INVALID_REQUEST",
+      `Push at most ${MAX_ASANA_TASKS} tasks at a time.`,
+    );
+  }
+
+  const tasks = rawTasks.map((raw) => {
+    const source = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+    const title = typeof source.title === "string" ? source.title.trim() : "";
+    if (title.length === 0) {
+      throw new PublicError(400, "INVALID_REQUEST", "Every task needs a title.");
+    }
+    const assigneeGid =
+      typeof source.assigneeGid === "string" ? source.assigneeGid.trim() : "";
+    if (assigneeGid && !GID_PATTERN.test(assigneeGid)) {
+      throw new PublicError(400, "INVALID_REQUEST", "Pick an assignee from the list.");
+    }
+    const dueOn = typeof source.dueOn === "string" ? source.dueOn.trim() : "";
+    if (dueOn && !DUE_DATE_PATTERN.test(dueOn)) {
+      throw new PublicError(400, "INVALID_REQUEST", "Due dates must look like 2026-07-30.");
+    }
+    return {
+      title: title.slice(0, 1_024),
+      notes: typeof source.notes === "string" ? source.notes.trim().slice(0, 4_000) : "",
+      assigneeGid,
+      dueOn,
+    };
+  });
+
+  return {
+    mode: candidate.mode === "grouped" ? "grouped" : "flat",
+    projectGid,
+    meetingTitle:
+      typeof candidate.meetingTitle === "string"
+        ? candidate.meetingTitle.trim().slice(0, 1_024)
+        : "",
+    tasks,
+  };
+}
+
+/** Calls an n8n Asana webhook and returns its parsed JSON, mapping failures safely. */
+async function callAsanaWebhook(
+  url: string | undefined,
+  payload: unknown,
+  fetchImplementation: typeof fetch,
+  timeoutMs: number,
+): Promise<unknown> {
+  if (!url) {
+    throw new PublicError(
+      503,
+      "ASANA_UNAVAILABLE",
+      "Asana is not configured. Publish the Asana workflows in n8n and try again.",
+    );
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response: Response;
+  try {
+    response = await fetchImplementation(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new PublicError(504, "AGENT_TIMEOUT", "Asana took too long to respond. Try again.");
+    }
+    throw new PublicError(
+      503,
+      "ASANA_UNAVAILABLE",
+      "Could not reach the Asana workflow. Check that n8n is running and the workflow is published.",
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (response.status === 404) {
+    throw new PublicError(
+      503,
+      "ASANA_UNAVAILABLE",
+      "The Asana workflow is not published in n8n yet.",
+    );
+  }
+
+  const rawBody = await response.text();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody);
+  } catch {
+    throw new PublicError(502, "ASANA_ERROR", "Asana returned an unexpected response.");
+  }
+
+  if (!response.ok) {
+    // Surface the workflow's own validation message, never raw provider detail.
+    const errorBody = parsed as { error?: { code?: unknown; message?: unknown } };
+    const message =
+      typeof errorBody?.error?.message === "string"
+        ? errorBody.error.message
+        : "Asana could not complete that request.";
+    throw new PublicError(response.status === 400 ? 400 : 502, "ASANA_ERROR", message);
+  }
+
+  return parsed;
+}
+
 async function readUpstreamBody(response: Response): Promise<unknown> {
   const rawBody = await response.text();
   if (Buffer.byteLength(rawBody) > MAX_UPSTREAM_BYTES) {
@@ -735,6 +887,68 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
               "FETCH_FAILED",
               "We couldn't get the transcript from that link. Try again.",
             ),
+          );
+        }
+        return;
+      }
+
+      if (url.pathname === "/api/asana/meta") {
+        if (request.method !== "GET" && request.method !== "POST") {
+          sendJson(response, 405, {
+            error: { code: "INVALID_REQUEST", message: "Use GET for Asana lookups." },
+          }, { Allow: "GET, POST" });
+          return;
+        }
+
+        try {
+          const meta = await callAsanaWebhook(
+            options.asanaLookupsUrl,
+            {},
+            fetchImplementation,
+            timeoutMs,
+          );
+          sendJson(response, 200, meta);
+        } catch (error) {
+          if (error instanceof PublicError) {
+            sendError(response, error);
+            return;
+          }
+          options.logError?.("Unexpected Asana lookup error", error);
+          sendError(
+            response,
+            new PublicError(502, "ASANA_ERROR", "Could not load your Asana projects."),
+          );
+        }
+        return;
+      }
+
+      if (url.pathname === "/api/asana/create") {
+        if (request.method !== "POST") {
+          sendJson(response, 405, {
+            error: { code: "INVALID_REQUEST", message: "Push tasks with POST." },
+          }, { Allow: "POST" });
+          return;
+        }
+
+        try {
+          const body = await readRequestBody(request);
+          const payload = validateAsanaCreateRequest(body);
+          const created = await callAsanaWebhook(
+            options.asanaCreateUrl,
+            payload,
+            fetchImplementation,
+            timeoutMs,
+          );
+          sendJson(response, 200, created);
+        } catch (error) {
+          if (error instanceof PublicError) {
+            sendError(response, error);
+            return;
+          }
+          options.logError?.("Unexpected Asana create error", error);
+          sendError(
+            response,
+            new PublicError(502, "ASANA_ERROR", "Could not create those Asana tasks."),
           );
         }
         return;

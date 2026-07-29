@@ -7,7 +7,7 @@
       name="description"
       content="A private, local chat interface for your project management agent."
     />
-    <title>Project Partner</title>
+    <title>Pitchy</title>
     <link rel="stylesheet" href="/styles.css" />
     <script src="/agent.config.js" defer></script>
     <script src="/app.js" defer></script>
@@ -19,10 +19,12 @@
       <aside class="agent-panel" aria-labelledby="agent-name">
         <div>
           <div class="brand">
-            <span class="brand__mark" id="agent-initials" aria-hidden="true">PP</span>
+            <span class="brand__mark" id="agent-initials" aria-hidden="true">
+              <img class="brand__logo" src="/logo.svg" alt="" />
+            </span>
             <div>
               <p class="brand__eyebrow">My local agent</p>
-              <h1 id="agent-name">Project Partner</h1>
+              <h1 id="agent-name">Pitchy</h1>
             </div>
           </div>
 
@@ -55,11 +57,11 @@
         <header class="chat-header">
           <div class="chat-header__identity">
             <span class="mobile-mark" id="mobile-agent-initials" aria-hidden="true">
-              PP
+              <img class="brand__logo" src="/logo.svg" alt="" />
             </span>
             <div>
               <p class="chat-header__kicker">Conversation</p>
-              <h2 id="conversation-title">Ask <span id="conversation-agent-name">Project Partner</span></h2>
+              <h2 id="conversation-title">Ask <span id="conversation-agent-name">Pitchy</span></h2>
             </div>
           </div>
 
@@ -98,7 +100,7 @@
 
           <form class="composer" id="chat-form">
             <label class="visually-hidden" for="message-input">
-              Message your project partner
+              Message Pitchy
             </label>
             <input
               class="visually-hidden"

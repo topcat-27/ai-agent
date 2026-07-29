@@ -7,10 +7,10 @@
  * Keep each example prompt on its own line and leave the commas in place.
  */
 window.AGENT_CONFIG = Object.freeze({
-  name: "Project Partner",
+  name: "Pitchy",
   subtitle: "A calm co-pilot for turning ideas into next steps.",
   welcomeMessage:
-    "Hello! I’m your project partner. Tell me what you’re working on, and we’ll turn it into clear, manageable next steps.",
+    "Hi, I’m Pitchy. Tell me what you’re working on — or paste a meeting link — and we’ll turn it into clear next steps.",
   primaryColour: "#1D3463",
   examplePrompts: [
     "Help me decide the three most important things to do today",

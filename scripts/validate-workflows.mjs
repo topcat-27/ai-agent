@@ -16,6 +16,8 @@ const expectedFiles = [
   "30-tool-propose-create-task.json",
   "31-tool-propose-update-task-status.json",
   "40-confirm-task-write.json",
+  "50-asana-lookups.json",
+  "51-asana-create-tasks.json",
   "90-debug-agent-health.json",
 ];
 const failures = [];
@@ -880,8 +882,13 @@ if (confirmWorkflow) {
 const skillBundle = await compileSkills(join(projectRoot, "skills"));
 check(
   JSON.stringify(skillBundle.enabledSkills.map((skill) => skill.id)) ===
-    JSON.stringify(["project-assistant", "task-capture", "weekly-status"]),
-  "Enabled skill list must contain the three reviewed Phase 5 examples",
+    JSON.stringify([
+      "project-assistant",
+      "task-capture",
+      "weekly-status",
+      "asana-capture",
+    ]),
+  "Enabled skill list must contain the four reviewed skill examples",
 );
 check(
   skillBundle.combinedInstructions.length <= 24_000 &&

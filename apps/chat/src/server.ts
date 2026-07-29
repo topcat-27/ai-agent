@@ -28,9 +28,19 @@ try {
   process.exit(1);
 }
 
+/** Asana webhooks sit beside the chat webhook on the same n8n instance. */
+function siblingWebhook(path: string): string {
+  return new URL(path, `${upstreamUrl.replace(/\/[^/]*$/, "")}/`).toString();
+}
+
+const asanaLookupsUrl = process.env.N8N_ASANA_LOOKUPS_URL ?? siblingWebhook("asana-lookups");
+const asanaCreateUrl = process.env.N8N_ASANA_CREATE_URL ?? siblingWebhook("asana-create");
+
 const server = createChatServer({
   publicDirectory,
   upstreamUrl,
+  asanaLookupsUrl,
+  asanaCreateUrl,
   timeoutMs,
   logError: (message, error) => console.error(message, error),
 });
