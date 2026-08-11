@@ -902,6 +902,7 @@ check(
       "task-capture",
       "weekly-status",
       "asana-capture",
+      "lead-conversion",
     ]),
   "Enabled skill list must contain the reviewed Project Manager skills",
 );
