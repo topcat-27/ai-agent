@@ -179,8 +179,9 @@ check(
 const workflows = (
   await readdir(join(projectRoot, "n8n/workflows"), { withFileTypes: true })
 ).filter((entry) => entry.isFile() && entry.name.endsWith(".json"));
-// 11 course workflows plus the two local Asana workflows (50, 51).
-check(workflows.length === 13, `Release must contain 13 workflows, found ${workflows.length}`);
+// 11 course workflows, the two local Asana workflows (50, 51), and the three
+// domain-research workflows (50, 51, 52).
+check(workflows.length === 16, `Release must contain 16 workflows, found ${workflows.length}`);
 
 if (failures.length > 0) {
   for (const failure of failures) {
