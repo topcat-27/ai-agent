@@ -24,22 +24,22 @@ The starter file looks like this:
 
 ```javascript
 window.AGENT_CONFIG = Object.freeze({
-  name: "Project Partner",
-  subtitle: "A calm co-pilot for turning ideas into next steps.",
+  name: "Project Manager",
+  subtitle: "Turn meetings, documents, and project ideas into clear next actions.",
   welcomeMessage:
-    "Hello! I’m your project partner. Tell me what you’re working on, and we’ll turn it into clear, manageable next steps.",
+    "Hello! I’m your Project Manager. Add a meeting transcript or tell me what you’re working on, and I’ll help turn it into decisions, plans, and safe next actions.",
   primaryColour: "#6D4AFF",
   examplePrompts: [
-    "Help me decide the three most important things to do today",
-    "Turn my project idea into a one-week action plan",
-    "What questions should I answer before I start this project?",
+    "Turn these meeting notes into decisions and action items",
+    "Build a practical project plan from this document",
+    "Show me the highest-priority work in my local project",
   ],
 });
 ```
 
 Change the words between the quotation marks. Keep the quotation marks, commas, square brackets, and other punctuation in place.
 
-Save the file, then refresh [http://localhost:3000](http://localhost:3000). The local Compose setup shares this folder with the chat container, so these settings update without rebuilding the image.
+Save the file, restart the local services, then refresh [http://localhost:3000](http://localhost:3000).
 
 ## Choose a colour
 
@@ -77,23 +77,23 @@ The interface displays configuration values and agent replies as plain text. It 
 
 ## For technical contributors
 
-The browser assets are in `apps/chat/public/`. The dependency-free TypeScript gateway is in `apps/chat/src/`.
+The browser assets are in `apps/chat/public/`. The small TypeScript gateway is
+in `apps/chat/src/`.
 
-Run its contract tests with:
+Install its locked dependencies and check that it builds with:
 
 ```bash
 cd apps/chat
 npm ci
-npm test
+npm run build
 ```
 
-Rebuild the container after changing TypeScript:
+Rebuild and restart after changing TypeScript:
 
 ```bash
-docker compose build chat
-docker compose up -d --wait chat
+node scripts/local.mjs restart
 ```
 
-Edits to files in `apps/chat/public/` are visible after a browser refresh in the local Compose environment.
+Edits to files in `apps/chat/public/` are visible after a plain browser refresh; they need no rebuild or restart.
 
 Learners can compare the supplied [finished Launch Partner example](../examples/finished-solo-project-assistant/README.md), then use [GitHub Desktop](GITHUB_DESKTOP.md) to commit and push their chosen customisation.

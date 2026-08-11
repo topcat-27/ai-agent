@@ -27,7 +27,7 @@ failed software build; a completed pilot that misses a criterion still fails.
 
 - [ ] Pilot is marked complete.
 - [ ] At least five participants had no involvement in development.
-- [ ] Both macOS and Windows with WSL2 were covered.
+- [ ] Both macOS and Windows were covered.
 - [ ] At least 80% received a real Claude response within 30 minutes.
 - [ ] Every participant completed preflight.
 - [ ] Every team customised the interface.
@@ -40,8 +40,8 @@ failed software build; a completed pilot that misses a criterion still fails.
 
 ## Technical gates
 
-- [x] The latest GitHub Actions run passes contract, static, PowerShell, and all
-      Docker smoke jobs.
+- [x] The pre-removal GitHub Actions run passed contract, static, PowerShell, native
+      learner-path, agent, resilience, and browser smoke jobs.
 - [ ] Invalid key, exhausted credit, inactive workflow, occupied port, restart,
       and no-internet scenarios have dated evidence.
 - [x] Browser checks pass at 375, 768, and 1440 pixels without horizontal
@@ -53,6 +53,8 @@ failed software build; a completed pilot that misses a criterion still fails.
 GitHub Actions run `30198827506` passed for evidence commit `adff923` on
 2026-07-26. The second gate remains open: automated simulations passed, but the
 supervised real-account and fully offline checks have not been recorded.
+The workflow and automated test assets were later removed at the repository
+owner's direction in August 2026, so this is historical evidence only.
 
 ## Decision record
 

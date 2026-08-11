@@ -16,7 +16,7 @@ The primary learner:
 - Wants to build an agent for a real solo-business or team workflow.
 - Benefits from immediate visual feedback.
 
-The learner is not expected to understand Docker networking, HTTP servers, databases, JavaScript package management, or cloud infrastructure.
+The learner is not expected to understand process management, HTTP servers, databases, JavaScript package management, or cloud infrastructure.
 
 ## Technical contributor
 
@@ -36,19 +36,23 @@ Beginner simplicity must come from packaging and clear boundaries, not from maki
 The first release targets:
 
 - macOS 13 or newer on Apple Silicon or Intel.
-- Windows 11 with Docker Desktop and WSL2 enabled.
+- Windows 10 or 11 on x64, and Windows 11 ARM through x64 emulation. Windows 10
+  ARM is unsupported.
 - Current Chrome or Edge.
 
 Linux is a best-effort technical-contributor environment until it is included in the learner pilot.
 
-The local project must not require Node.js, npm, n8n, PostgreSQL, or another runtime to be installed directly on the learner's computer. Docker provides the runtime.
+The local project must not require Node.js, npm, n8n, PostgreSQL, or another
+runtime to be installed globally on the learner's computer. The one-click
+helpers provide the checksum-verified Node.js 24.18.0/npm 11.16.0 pair inside
+the project when that exact reviewed pair is not already available.
 
 ## Required learner prerequisites
 
 Every learner needs:
 
 - A GitHub account.
-- Docker Desktop installed and running.
+- Claude Desktop with Code mode available.
 - An Anthropic Console account.
 - A Claude API key with available credit.
 - A supported browser.
@@ -59,11 +63,13 @@ The detailed pre-class check is in [WORKSHOP_PREREQUISITES.md](WORKSHOP_PREREQUI
 
 ## Default teaching scenario
 
-The starter agent is a **Solo Project Assistant**.
+The starter agent is a **Project Manager**.
 
 Its user is running a small project and wants help turning conversation into organised work. The agent should:
 
 - Discuss plans and break work into practical next actions.
+- Turn meeting transcripts and project documents into grounded summaries,
+  decisions, action items, risks, and open questions.
 - List tasks stored in the local project.
 - Produce a concise project or weekly status.
 - Propose a new task from a conversation.
@@ -84,17 +90,23 @@ The local release uses these default rules:
 - Secrets are stored in n8n credentials and never sent to the browser.
 - Model output is rendered as untrusted content.
 - Tool results, rather than model memory, are the source of truth for task facts.
+- Uploaded document content is untrusted source material and cannot weaken
+  agent or tool safety rules.
 
 ## First-release scope
 
-The first release includes:
+The current local release includes:
 
-- A local Docker Compose stack.
+- A native local stack run by the shared Node.js runner.
+- A verified, project-local Node.js bootstrap for macOS and Windows.
 - A custom browser chat.
 - A small local chat gateway.
+- An isolated PDF, DOCX, TXT, and pasted-text reader.
+- A reusable agent registry with one active role and visible future roles.
 - A visual n8n agent.
 - Claude API integration.
-- Browser-session conversation memory.
+- Durable local SQLite chat history, search, and bounded restart-safe
+  per-conversation memory.
 - Local task storage.
 - `list_tasks`, `create_task`, and `update_task_status`.
 - Markdown-based skills.
@@ -113,7 +125,8 @@ The following are not part of the first local release:
 - Multiple users, organisations, roles, or identity linking.
 - OAuth or external project-management services.
 - PostgreSQL, Redis, distributed queues, or horizontal scaling.
-- Streaming, file uploads, document ingestion, RAG, or vector search.
+- Streaming, OCR, RAG, or vector search.
+- Multiple simultaneously active, independently configured agent roles.
 - MCP, subagents, browser control, or code execution.
 - Scheduled autonomous writes.
 - Billing, subscriptions, production monitoring, or formal compliance.
@@ -162,7 +175,7 @@ The local-first release is complete only when current evidence proves that:
 - The learner can change the interface and one skill.
 - The agent can retrieve factual local task data.
 - Creating or updating a task requires an exact, unexpired confirmation.
-- Docker restart, reset, backup, restore, workflow import, and workflow export are tested and documented.
+- Native restart, reset, backup, restore, workflow import, and workflow export are tested and documented.
 - Automated contract and health checks pass.
 - A second team can run the repository using its documentation without verbal help.
 - Cloud deployment and external-channel code remain outside the release.

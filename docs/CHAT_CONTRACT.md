@@ -1,257 +1,296 @@
-# Local Chat Contract
+# Local chat contract
 
 ## Purpose
 
-This contract separates the learner-owned browser interface from the n8n agent. It allows either side to evolve without requiring teams to rewrite the other.
+This contract separates the reusable browser interface from individual n8n
+agents. Contract version 3 adds durable local conversation history and bounded
+restart-safe agent context to the version 2 agent and document contract. The
+gateway continues to accept version 1 and 2 inputs during migration.
 
-The local release uses synchronous request and response processing. Provider webhooks and asynchronous jobs are deferred.
+The browser never calls n8n or the document reader directly.
 
-Phase 2 implements the browser-facing side of this contract in the TypeScript chat gateway. Phase 3 supplies the n8n workflow behind the private webhook.
+## Browser endpoints
 
-## Endpoints
-
-### Browser-facing health check
+### Health
 
 ```http
 GET /health
 ```
 
-Successful response:
+```json
+{ "status": "ok" }
+```
+
+This proves only that the chat gateway is running.
+
+### Agent registry
+
+```http
+GET /api/agents
+```
 
 ```json
 {
-  "status": "ok"
+  "schemaVersion": 1,
+  "agents": [
+    {
+      "id": "project-manager",
+      "name": "Project Manager",
+      "description": "Plans projects, analyses meetings, and turns decisions into safe next actions.",
+      "status": "active",
+      "examplePrompts": ["Turn these meeting notes into decisions and action items"]
+    }
+  ]
 }
 ```
 
-The health endpoint confirms that the chat service is running. It does not claim that n8n, the workflow, or Claude is ready.
+The response deliberately excludes each internal `workflowPath`. Coming-soon
+agents are safe to display but cannot receive chat requests.
 
-### Browser-facing chat endpoint
+### Add pasted text
+
+```http
+POST /api/documents/text
+Content-Type: application/json
+```
+
+```json
+{
+  "sessionId": "9d4482cf-f720-4f70-98af-e337db1a9d53",
+  "name": "Monday planning meeting",
+  "text": "A long transcript..."
+}
+```
+
+Successful status is `201`. The response contains document metadata and a short
+preview, never the complete stored text.
+
+### Upload a file
+
+```http
+POST /api/documents
+Content-Type: multipart/form-data
+```
+
+The form contains one UUID `sessionId` field and one `file` field. Supported
+formats are searchable PDF, DOCX, and UTF-8 TXT. Successful status is `201`.
+
+### Remove a document
+
+```http
+DELETE /api/documents/{documentId}?sessionId={sessionId}
+```
+
+Successful status is `204`. A document can be read or removed only from the
+session that created it.
+
+### Send a chat request
 
 ```http
 POST /api/chat
 Content-Type: application/json
 ```
 
-Request:
-
 ```json
 {
+  "requestId": "34ef81f9-e46e-4e22-a890-184dd5e4ae6d",
   "sessionId": "9d4482cf-f720-4f70-98af-e337db1a9d53",
-  "message": "Show me my open tasks"
+  "agentId": "project-manager",
+  "message": "List the confirmed decisions and action items.",
+  "documentIds": ["be7ad8f0-f299-4ab8-9ddd-011c0aad2f17"]
 }
 ```
+
+`agentId` defaults to `project-manager` and `documentIds` defaults to an empty
+array for version 1 browser clients. `requestId` is a UUID used for idempotency;
+the gateway generates one for an older client that omits it.
 
 Successful response:
 
 ```json
 {
   "sessionId": "9d4482cf-f720-4f70-98af-e337db1a9d53",
-  "reply": "You have three open tasks.",
+  "requestId": "34ef81f9-e46e-4e22-a890-184dd5e4ae6d",
+  "messageId": "445cc446-d86f-456d-9904-725973289f30",
+  "reply": "The meeting confirmed two decisions...",
   "runId": "68c58560-19e4-49ea-aa6f-8b62e18329a0"
 }
 ```
 
-`runId` is optional in the first workflow but reserved for diagnostics and future asynchronous processing.
+`runId` is optional.
 
-### Browser-facing file upload endpoint
-
-```http
-POST /api/upload
-Content-Type: application/json
-```
-
-This backward-compatible addition lets the browser turn an uploaded PDF or
-document into a plain-text transcript that the learner can review in the
-composer before sending. Extraction happens in the gateway; the file bytes never
-reach n8n or Claude.
-
-Request (the browser reads the file and base64-encodes it):
-
-```json
-{
-  "filename": "team-standup.pdf",
-  "dataBase64": "JVBERi0xLjQK..."
-}
-```
-
-Successful response:
-
-```json
-{
-  "filename": "team-standup.pdf",
-  "characters": 4820,
-  "truncated": false,
-  "text": "Meeting transcript..."
-}
-```
-
-Rules the gateway enforces:
-
-| Field | Rule |
-| --- | --- |
-| `filename` | Required string, 1–255 characters, with a supported extension |
-| Supported extensions | `.pdf`, `.docx`, `.txt`, `.md` |
-| `dataBase64` | Required base64 string of the raw file |
-| Raw file size | 10 MB maximum |
-| Extracted `text` | Trimmed and normalised; capped at 200,000 characters (`truncated` reports the cap) |
-
-`text` is plain text only; the browser inserts it into the composer as untrusted
-text under the same rules as any other message. The extracted transcript is still
-sent as a normal `message`, within the 100,000-character message limit.
-
-### Browser-facing link ingest endpoint
+### Saved conversations
 
 ```http
-POST /api/ingest-url
-Content-Type: application/json
+GET /api/conversations?limit=50&cursor={opaqueCursor}
+POST /api/conversations
+GET /api/conversations/{sessionId}?limit=100&before={sequence}
+PATCH /api/conversations/{sessionId}
+DELETE /api/conversations/{sessionId}
+GET /api/conversations/search?q={query}&limit=50
 ```
 
-This backward-compatible addition turns a supported meeting-notetaker share link
-into a transcript the learner can review before sending. The gateway fetches the
-link server-side and extracts plain text; the browser only ever sends the URL.
+The list is newest first. Conversation and message endpoints use bounded cursor
+pagination. `PATCH` accepts a `title` from 1 to 80 characters. `DELETE` removes
+the conversation, its messages, attachment snapshots, and search entries.
+Search accepts 1–200 characters and returns plain-text matching snippets.
 
-Request:
+## Gateway-to-n8n request
+
+The gateway resolves document IDs, confirms that each belongs to the current
+session, and selects a workflow from the trusted server registry. It sends the
+validated request to `N8N_CHAT_WEBHOOK_URL`, which is a loopback address in the
+local runner.
 
 ```json
 {
-  "url": "https://fathom.video/share/<token>"
+  "schemaVersion": 3,
+  "requestId": "34ef81f9-e46e-4e22-a890-184dd5e4ae6d",
+  "sessionId": "9d4482cf-f720-4f70-98af-e337db1a9d53",
+  "agentId": "project-manager",
+  "message": "List the confirmed decisions and action items.",
+  "history": [
+    { "role": "user", "content": "Remember that launch is Friday." },
+    { "role": "assistant", "content": "The launch is Friday." }
+  ],
+  "documents": [
+    {
+      "id": "be7ad8f0-f299-4ab8-9ddd-011c0aad2f17",
+      "name": "Monday planning meeting",
+      "type": "pasted-text",
+      "wordCount": 10243,
+      "characterCount": 58711,
+      "text": "The normalised source text..."
+    }
+  ]
 }
 ```
 
-Successful response:
+The gateway selects the newest six complete user/assistant pairs that fit within
+24,000 characters. It excludes pending, failed, and interrupted turns and keeps
+the current message separate. The n8n workflow validates the request again
+before model or tool execution.
+Direct legacy requests without `schemaVersion`, `agentId`, or `documents` are
+treated as Project Manager version 1 text requests.
 
-```json
-{
-  "source": "fathom",
-  "title": "PitchUp x AO StartUps",
-  "characters": 25831,
-  "truncated": false,
-  "text": "Meeting transcript..."
-}
-```
+## Limits
 
-Rules the gateway enforces:
-
-| Field | Rule |
+| Input | Limit |
 | --- | --- |
-| `url` | Required HTTPS string, 1–2,048 characters |
-| Supported sources | `fathom.video/share/…` and `notes.granola.ai/t|d/…` only |
-| Host allowlist | Enforced on every redirect hop (SSRF guard); no other host is ever contacted |
-| Response caps | 8 MB per fetch, 4 redirects, request timeout applies |
-| Extracted `text` | Trimmed and normalised; capped at 100,000 characters (`truncated` reports the cap) |
+| Normal message | 1–100,000 characters after trimming (raised locally for pasted transcripts) |
+| JSON chat body | 1,048,576 bytes |
+| Files per request | 3 |
+| One uploaded file | 20 MB |
+| Extracted or pasted text per document | 150,000 characters |
+| Combined document text per request | 200,000 characters |
+| Searchable PDF | 200 pages |
+| Expanded DOCX archive | 1,000 entries and 50 MB |
+| Stored document lifetime | 24 hours |
+| n8n reply returned through the gateway | 8,000 characters |
+| Durable history supplied to n8n | 6 complete turns, 12 messages, 24,000 characters |
+| Conversation title | 80 characters |
+| Search query | 200 characters |
 
-Both services expose the shared meeting content publicly to anyone with the link,
-so no API key or login is used. The extracted transcript is sent as a normal
-`message`, within the 100,000-character message limit.
+Document IDs must be unique in a request. Malformed requests do not reach
+Claude.
 
-### Gateway-to-n8n endpoint
+## Extraction and storage
 
-The gateway sends the validated request over the private Docker network:
+The isolated `document-worker` reads the original bytes and returns normalised
+text plus metadata to the gateway. It has no published host port and no n8n or
+Claude credentials.
 
-```http
-POST http://n8n:5678/webhook/chat
-Content-Type: application/json
-```
+The gateway stores extracted text as mode-`0600` JSON records in the
+Git-ignored `data/documents/` folder. Records contain a source hash for diagnostics,
+expire after 24 hours, and are bound to the browser session UUID. The original
+file is not stored.
 
-The n8n workflow independently validates the same fields, sends only valid input to the agent, and returns the same successful response shape.
+This is workshop privacy, not multi-user authentication. Anyone who can execute
+code on the local computer or access its local data can inspect records.
 
-The browser must never call the n8n webhook directly.
+## Chat history storage
 
-## Request validation
+The gateway stores conversation titles, user and assistant messages, safe error
+states, and attachment metadata in `data/chat/chat.sqlite`. The SQLite file is
+plaintext, Git-ignored local data. It uses foreign keys, WAL, schema migrations,
+and FTS5 search. Full document text is not duplicated into this database.
 
-The gateway must enforce:
+A user message is committed before n8n runs. A successful assistant reply is
+committed before it is returned to the browser. A startup changes any leftover
+`pending` turn to `interrupted` and never automatically replays it. A completed
+duplicate `requestId` returns the stored response without rerunning n8n.
 
-| Field | Rule |
-| --- | --- |
-| `sessionId` | Required UUID string |
-| `message` | Required string after trimming |
-| `message` length | 1 to 100,000 characters after trimming |
-| Unknown fields | Ignored in version 1 |
-| Request body | JSON only |
+## Document safety
 
-The gateway trims the message before forwarding it. It does not alter the session identifier.
+The workflow:
 
-Malformed requests must not reach n8n or Claude.
+- sanitises document names;
+- validates document type, count, and length;
+- wraps each source in explicit untrusted-document boundaries;
+- tells the model that document content is data, never instructions;
+- forbids a transcript from triggering stored task writes unless the current
+  user instruction explicitly requests a proposal.
 
-## Successful response validation
-
-The gateway accepts an n8n success response only when:
-
-- `sessionId` is the same value supplied in the request.
-- `reply` is a non-empty string.
-- `runId`, when supplied, is a string.
-
-An invalid upstream response becomes an `AGENT_ERROR`; it is never forwarded to the browser unchanged.
+These controls reduce prompt-injection risk; they do not prove arbitrary source
+material safe.
 
 ## Error format
-
-All browser-facing errors use:
 
 ```json
 {
   "error": {
-    "code": "AGENT_UNAVAILABLE",
-    "message": "The local agent is not ready. Check that n8n is running and the chat workflow is active."
+    "code": "DOCUMENT_TEXT_TOO_LARGE",
+    "message": "Pasted text must be 150,000 characters or fewer."
   }
 }
 ```
 
-Supported error codes:
+Common stable codes:
 
-| HTTP status | Code | Meaning |
+| HTTP | Code | Meaning |
 | --- | --- | --- |
-| 400 | `INVALID_REQUEST` | JSON or required fields are invalid |
-| 413 | `MESSAGE_TOO_LONG` | Trimmed message exceeds 100,000 characters |
-| 413 | `FILE_TOO_LARGE` | Uploaded file exceeds 10 MB (`/api/upload`) |
-| 415 | `UNSUPPORTED_FILE` | Uploaded file type is not supported (`/api/upload`) |
-| 415 | `UNSUPPORTED_SOURCE` | Link is not a supported meeting source (`/api/ingest-url`) |
-| 422 | `EXTRACTION_FAILED` | No readable text could be extracted from the file (`/api/upload`) |
-| 502 | `FETCH_FAILED` | The link could not be fetched or parsed (`/api/ingest-url`) |
-| 429 | `RATE_LIMITED` | Claude or a future local limiter rejected the request |
-| 502 | `AGENT_ERROR` | n8n returned an invalid response or the agent failed |
-| 503 | `AGENT_UNAVAILABLE` | n8n or the active workflow cannot be reached |
-| 504 | `AGENT_TIMEOUT` | The local workflow did not complete before the gateway timeout |
+| 400 | `INVALID_REQUEST` | JSON, session, agent, or required input is invalid |
+| 400 | `TOO_MANY_DOCUMENTS` | More than three documents were selected |
+| 404 | `DOCUMENT_NOT_FOUND` | Record expired, was removed, or belongs to another session |
+| 404 | `CONVERSATION_NOT_FOUND` | Saved conversation does not exist |
+| 409 | `REQUEST_IN_PROGRESS` | Request ID is pending, failed, or interrupted and cannot be replayed |
+| 413 | `MESSAGE_TOO_LONG` | Instruction exceeds 8,000 characters |
+| 413 | `FILE_TOO_LARGE` | Upload exceeds 20 MB |
+| 413 | `DOCUMENT_TEXT_TOO_LARGE` | One extracted or pasted text exceeds its limit |
+| 415 | `UNSUPPORTED_FILE_TYPE` | File is not PDF, DOCX, or TXT |
+| 429 | `RATE_LIMITED` | Provider or local limiter rejected the request |
+| 500 | `CHAT_HISTORY_ERROR` | Local conversation storage or search is unavailable |
+| 502 | `AGENT_ERROR` | n8n failed or returned an invalid response |
+| 503 | `AGENT_UNAVAILABLE` | n8n or the selected workflow is unavailable |
+| 503 | `DOCUMENT_SERVICE_UNAVAILABLE` | Local extractor is unavailable |
+| 504 | `AGENT_TIMEOUT` | Workflow exceeded the gateway deadline |
 
-Browser-facing messages should tell the learner what to check. They must not contain:
+Raw provider responses, stack traces, credentials, environment values, and
+stored source text must not appear in browser-facing errors.
 
-- Claude API keys.
-- n8n credentials.
-- Container environment values.
-- Raw stack traces.
-- Unfiltered upstream response bodies.
+## Timeout and memory
 
-## Timeout
+The gateway deadline is 120 seconds. The n8n workflow timeout is 110 seconds,
+the Claude node requests at most 2,200 output tokens, and the agent may take at
+most four iterations.
 
-The local gateway timeout is 60 seconds.
-
-The n8n workflow has a 50-second execution timeout so it normally fails before the gateway reaches its own ceiling. The Claude node requests at most 900 output tokens, the AI Agent may take at most four iterations, and the final `reply` is capped at 8,000 characters.
-
-Technical contributors may change `CHAT_REQUEST_TIMEOUT_MS` in `compose.yaml`, but the learner-facing gateway default and tests remain 60 seconds unless this contract is versioned.
-
-## Session behaviour
-
-- The browser creates a UUID session identifier.
-- The identifier is stored in browser local storage.
-- Every message in the active conversation reuses that identifier.
-- New conversation creates a new identifier.
-- The identifier is not an authenticated user identity.
-- Conversation history must not be shared across session identifiers.
-- The supplied Simple Memory node retains six interactions for each session while n8n is running.
-- Restarting or stopping n8n clears this process-local memory.
+SQLite history is keyed by conversation UUID and each conversation is bound to
+one `agentId`, preventing active roles from sharing context. The n8n workflow
+does not use process-local Simple Memory. The gateway supplies the bounded
+durable history on every request, so restarting n8n does not change memory
+behaviour. A session UUID is not an authenticated user identity.
 
 ## Browser rendering
 
-The browser treats `reply` as untrusted text.
-
-Version 1 may render plain text. If Markdown rendering is added, generated HTML must be sanitised before insertion into the page. Scripts, inline event handlers, and arbitrary HTML are not permitted.
+Agent replies are inserted with `textContent` as untrusted plain text. If
+Markdown is added later, generated HTML must be sanitised before rendering.
 
 ## Security boundary
 
 - The browser receives no Claude credential.
 - The gateway receives no Claude credential.
 - The n8n credential store owns the Claude API key.
-- n8n is accessible on localhost for editing, but the gateway uses its Docker-network address.
+- The gateway reaches n8n only through the loopback `N8N_CHAT_WEBHOOK_URL`.
 - The chat endpoint uses same-origin browser requests in the local release.
 - Authentication and public ingress are deferred until cloud deployment.
 
@@ -262,6 +301,7 @@ Changes are backward-compatible when they:
 - Add optional response fields.
 - Add ignored request fields.
 - Improve error prose without changing error codes.
+- Accept older browser requests without `requestId`.
 
 Changes require a versioned contract when they:
 
@@ -273,7 +313,9 @@ Changes require a versioned contract when they:
 
 ## Contract acceptance tests
 
-The Phase 2 contract suite proves:
+Automated tests cover gateway validation, stable error handling, response
+filtering, static-file safety, text extraction, invalid binary input, workflow
+structure, prompt boundaries, and size limits. The contract suite proves:
 
 - A valid request is forwarded and returned.
 - Whitespace is trimmed.
@@ -284,12 +326,79 @@ The Phase 2 contract suite proves:
 - A malformed n8n response returns `AGENT_ERROR`.
 - Raw upstream errors and secrets are not returned.
 - The response session identifier must match the request.
+- Completed turns persist, search, and return idempotently by `requestId`.
+- Failed and interrupted turns never enter model history or replay automatically.
+- Conversation CRUD, pagination, agent isolation, and FTS cascade deletion work.
+- Document IDs are session-bound and document text is wrapped as untrusted
+  source material.
+- The local document reader rejects unsupported, oversized, or malformed input.
 
-The Phase 3 agent smoke test additionally proves:
+The native packaging and agent smoke tests additionally prove:
 
-- Both exported workflows import and publish in the pinned n8n image.
+- Both exported workflows import and publish in the pinned n8n package.
+- n8n, the document reader, and chat all become healthy.
+- An uploaded or pasted text record can travel through the gateway.
 - A malformed direct webhook request returns a safe error without calling the model.
 - A valid browser request travels through the gateway and workflow.
-- A session recalls its own conversation while a different session remains isolated.
+- A session recalls its durable conversation after restart while a different
+  session remains isolated.
 - Agent output is capped.
-- Restarting n8n clears the documented Simple Memory state.
+- Backup, reset, and restore preserve current-format chat history.
+
+## PitchUp additions
+
+These endpoints are local extensions to the course contract. They are additive:
+they do not change `/api/chat`, and the browser still sends the resulting text as
+a normal `message`.
+
+### Meeting-link ingest
+
+```http
+POST /api/ingest-url
+Content-Type: application/json
+```
+
+Request `{ "url": "https://fathom.video/share/<token>" }`; response
+`{ source, title, characters, truncated, text }`.
+
+| Rule | Value |
+| --- | --- |
+| Supported sources | `fathom.video/share/…` and `notes.granola.ai/t\|d/…` only |
+| Host allowlist | Re-checked on every redirect hop (SSRF guard) |
+| Response caps | 8 MB per fetch, 4 redirects, request timeout applies |
+| Extracted `text` | Trimmed, normalised, capped at 100,000 characters |
+
+Both services expose the shared meeting publicly to anyone holding the link, so no
+API key or login is used.
+
+### Transcript extraction from a file
+
+```http
+POST /api/upload
+Content-Type: application/json
+```
+
+Request `{ "filename": "notes.pdf", "dataBase64": "…" }`; response
+`{ filename, characters, truncated, text }`. Supports `.pdf`, `.docx`, `.txt`
+and `.md` up to 10 MB. This runs entirely in the gateway; the file never reaches
+n8n or Claude. For richer, persisted attachments prefer `/api/documents`.
+
+### Asana capture
+
+```http
+GET  /api/asana/meta
+POST /api/asana/create
+```
+
+`meta` returns `{ projects, members, defaultProjectGid }` for the review panel's
+dropdowns. `create` accepts `{ mode, projectGid, meetingTitle, tasks[] }` and is
+called only after a person edits the proposal and presses "Push to Asana".
+
+The Asana token lives only in the n8n credential store. The write path is the n8n
+workflow `51 - ASANA - Create Tasks`, which is deliberately not connected to any
+AI Tool node, so the model can propose tasks but can never create them.
+
+### Message limit
+
+The message limit is 100,000 characters so a full meeting transcript can be sent
+in one message. Conversation history sent to n8n stays bounded independently.

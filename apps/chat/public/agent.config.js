@@ -8,13 +8,13 @@
  */
 window.AGENT_CONFIG = Object.freeze({
   name: "Pitchy",
-  subtitle: "A calm co-pilot for turning ideas into next steps.",
+  subtitle: "Turn meetings, documents, and project ideas into clear next actions.",
   welcomeMessage:
     "Hi, I’m Pitchy. Tell me what you’re working on — or paste a meeting link — and we’ll turn it into clear next steps.",
   primaryColour: "#1D3463",
   examplePrompts: [
-    "Help me decide the three most important things to do today",
-    "Turn my project idea into a one-week action plan",
-    "What questions should I answer before I start this project?",
+    "Turn these meeting notes into decisions and action items",
+    "Build a practical project plan from this document",
+    "Show me the highest-priority work in my local project",
   ],
 });

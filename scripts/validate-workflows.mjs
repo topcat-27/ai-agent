@@ -156,8 +156,8 @@ if (agentWorkflow) {
     "Agent workflow must keep confirmation routing and tool wiring explainable",
   );
   check(
-    agentWorkflow.settings?.executionTimeout === 50,
-    "Agent workflow timeout must remain 50 seconds",
+    agentWorkflow.settings?.executionTimeout === 110,
+    "Agent workflow timeout must remain 110 seconds",
   );
 
   const webhook = nodeByName(agentWorkflow, "Chat Webhook");
@@ -176,11 +176,28 @@ if (agentWorkflow) {
   check(/\.trim\(\)/.test(validationCode), "Validation: message must be trimmed");
   check(
     /message\.length > 100000/.test(validationCode),
-    "Validation: 100,000-character limit is missing",
+    "Validation: 100,000-character instruction limit is missing",
   );
   check(
     /uuidPattern\.test\(sessionId\)/.test(validationCode),
     "Validation: session UUID check is missing",
+  );
+  check(
+    /rawDocuments\.length > 3/.test(validationCode) &&
+      /combinedCharacters > 200000/.test(validationCode) &&
+      /text\.length > 150000/.test(validationCode),
+    "Validation: document count and text-size limits are missing",
+  );
+  check(
+    /agentId !== 'project-manager'/.test(validationCode),
+    "Validation: active agent allow-list check is missing",
+  );
+  check(
+    /schemaVersion === 3/.test(validationCode) &&
+      /rawHistory\.length > 12/.test(validationCode) &&
+      /historyCharacters > 24000/.test(validationCode) &&
+      /uuidPattern\.test\(requestId\)/.test(validationCode),
+    "Validation: durable-history contract version, request ID, turn, or character limit is missing",
   );
 
   const condition = nodeByName(agentWorkflow, "Request Is Valid?");
@@ -237,8 +254,8 @@ if (agentWorkflow) {
     "Claude model: expected pinned claude-sonnet-4-6",
   );
   check(
-    model?.parameters?.options?.maxTokensToSample === 900,
-    "Claude model: output token ceiling must remain 900",
+    model?.parameters?.options?.maxTokensToSample === 2200,
+    "Claude model: output token ceiling must remain 2,200",
   );
   check(
     connectionTargets(agentWorkflow, "Claude - Sonnet 4.6", "ai_languageModel", 0)
@@ -246,26 +263,21 @@ if (agentWorkflow) {
     "Claude model must be connected to the agent",
   );
 
-  const memory = nodeByName(agentWorkflow, "Conversation Memory");
-  check(
-    memory?.type === "@n8n/n8n-nodes-langchain.memoryBufferWindow" &&
-      memory?.typeVersion === 1.4,
-    "Memory: expected Simple Memory 1.4",
+  const memory = agentWorkflow.nodes.find(
+    (node) => node.name === "Conversation Memory",
   );
   check(
-    memory?.parameters?.sessionIdType === "customKey" &&
-      /Validate and Normalise/.test(memory?.parameters?.sessionKey ?? ""),
-    "Memory: must be keyed by the validated browser session",
+    memory === undefined,
+    "Memory: process-local Simple Memory must be removed when SQLite history is authoritative",
   );
+  const contextBuilder = nodeByName(agentWorkflow, "Build Agent Context");
+  const durableContextCode = contextBuilder?.parameters?.jsCode ?? "";
   check(
-    memory?.parameters?.contextWindowLength === 6,
-    "Memory: context window must remain six interactions",
-  );
-  check(
-    connectionTargets(agentWorkflow, "Conversation Memory", "ai_memory", 0).includes(
-      "Project Partner Agent",
-    ),
-    "Memory must be connected to the agent",
+    /BEGIN SAVED CONVERSATION HISTORY/.test(durableContextCode) &&
+      /EARLIER USER/.test(durableContextCode) &&
+      /CURRENT USER INSTRUCTION/.test(durableContextCode) &&
+      /never replay an earlier confirmation/.test(durableContextCode),
+    "Memory: validated SQLite history must be labelled and kept distinct from the current instruction",
   );
 
   const listTool = nodeByName(agentWorkflow, "list_tasks");
@@ -341,8 +353,10 @@ if (agentWorkflow) {
   check(
     /enabledSkills/.test(contextCode) &&
       /combinedInstructions/.test(contextCode) &&
-      /Delete, archive, bulk changes/.test(contextCode),
-    "Agent: context builder must apply enabled skills without weakening the risk policy",
+      /Delete, archive, bulk changes/.test(contextCode) &&
+      /untrusted source material/.test(contextCode) &&
+      /BEGIN UNTRUSTED DOCUMENT/.test(contextCode),
+    "Agent: context builder must apply enabled skills and safely delimit untrusted documents",
   );
 
   const success = nodeByName(agentWorkflow, "Return Agent Reply");
@@ -884,11 +898,12 @@ check(
   JSON.stringify(skillBundle.enabledSkills.map((skill) => skill.id)) ===
     JSON.stringify([
       "project-assistant",
+      "meeting-analysis",
       "task-capture",
       "weekly-status",
       "asana-capture",
     ]),
-  "Enabled skill list must contain the four reviewed skill examples",
+  "Enabled skill list must contain the reviewed Project Manager skills",
 );
 check(
   skillBundle.combinedInstructions.length <= 24_000 &&

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="A private, local chat interface for your project management agent."
+      content="A private, local workspace for reusable business agents."
     />
     <title>Pitchy</title>
     <link rel="stylesheet" href="/styles.css" />
@@ -16,7 +16,11 @@
     <a class="skip-link" href="#message-input">Skip to message box</a>
 
     <main class="app-shell">
-      <aside class="agent-panel" aria-labelledby="agent-name">
+      <aside class="agent-panel" id="agent-panel" aria-labelledby="agent-name">
+        <button class="history-close" id="history-close" type="button">
+          <span aria-hidden="true">×</span>
+          <span class="visually-hidden">Close chat history</span>
+        </button>
         <div>
           <div class="brand">
             <span class="brand__mark" id="agent-initials" aria-hidden="true">
@@ -29,27 +33,50 @@
           </div>
 
           <p class="agent-panel__subtitle" id="agent-subtitle">
-            A calm co-pilot for turning ideas into next steps.
+            Turn meetings, documents, and project ideas into clear next actions.
           </p>
 
           <div class="local-status">
             <span class="local-status__dot" aria-hidden="true"></span>
-            <span>Running privately on this computer</span>
+            <span>Local app · responses use your Claude API</span>
           </div>
         </div>
 
-        <section class="starter-guide" aria-labelledby="starter-title">
-          <p class="section-label" id="starter-title">Good things to ask</p>
-          <ul>
-            <li>Turn a rough idea into a practical plan</li>
-            <li>Find the most useful next action</li>
-            <li>Summarise project notes and decisions</li>
-          </ul>
+        <section class="agent-selector" aria-labelledby="agent-selector-title">
+          <p class="section-label" id="agent-selector-title">Agents</p>
+          <div class="agent-list" id="agent-list" role="list"></div>
+        </section>
+
+        <section class="history-panel" aria-labelledby="history-title">
+          <div class="history-panel__header">
+            <p class="section-label" id="history-title">Chats</p>
+            <button class="history-new" id="history-new" type="button">
+              New
+            </button>
+          </div>
+          <form class="history-search" id="history-search-form" role="search">
+            <label class="visually-hidden" for="history-search-input">
+              Search saved chats
+            </label>
+            <input
+              id="history-search-input"
+              type="search"
+              maxlength="200"
+              placeholder="Search chats"
+              autocomplete="off"
+            />
+          </form>
+          <p class="history-status" id="history-status" aria-live="polite"></p>
+          <div class="history-list" id="history-list" role="list"></div>
+          <button class="history-more" id="history-more" type="button" hidden>
+            Load more
+          </button>
         </section>
 
         <p class="privacy-note">
           <span aria-hidden="true">✦</span>
-          This workshop version stays on your local Docker network.
+          Chats are saved locally in plaintext. Prompts and relevant file text
+          are sent to Claude when you ask the agent.
         </p>
       </aside>
 
@@ -60,24 +87,38 @@
               <img class="brand__logo" src="/logo.svg" alt="" />
             </span>
             <div>
-              <p class="chat-header__kicker">Conversation</p>
-              <h2 id="conversation-title">Ask <span id="conversation-agent-name">Pitchy</span></h2>
+              <p class="chat-header__kicker">Conversation · <span id="conversation-agent-name">Pitchy</span></p>
+              <h2 id="conversation-title"><span id="conversation-title-text">New conversation</span></h2>
             </div>
           </div>
 
-          <button class="reset-button" id="reset-button" type="button">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M4.93 4.93a10 10 0 1 1-1.79 11.46M3 8V3m0 0h5"
-                fill="none"
-                stroke="currentColor"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="1.8"
-              />
-            </svg>
-            <span>New conversation</span>
-          </button>
+          <div class="chat-header__actions">
+            <button
+              class="history-button"
+              id="history-button"
+              type="button"
+              aria-controls="agent-panel"
+              aria-expanded="false"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 6h14M5 12h14M5 18h9" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.8" />
+              </svg>
+              <span class="visually-hidden">Open chat history</span>
+            </button>
+            <button class="reset-button" id="reset-button" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M4.93 4.93a10 10 0 1 1-1.79 11.46M3 8V3m0 0h5"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="1.8"
+                />
+              </svg>
+              <span>New conversation</span>
+            </button>
+          </div>
         </header>
 
         <div
@@ -96,49 +137,117 @@
             <div class="suggestion-list" id="suggestion-list"></div>
           </section>
 
-          <p class="attachment-status" id="attachment-status" role="status" aria-live="polite" hidden></p>
-
           <form class="composer" id="chat-form">
             <label class="visually-hidden" for="message-input">
               Message Pitchy
             </label>
-            <input
-              class="visually-hidden"
-              type="file"
-              id="file-input"
-              accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown"
-            />
-            <button
-              class="attach-button"
-              id="attach-button"
-              type="button"
-              aria-label="Attach a PDF or document to pull in its transcript"
-              title="Attach a PDF or document (PDF, .docx, .txt, .md)"
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path
-                  d="M21 11.5 12.5 20a5 5 0 0 1-7-7l8-8a3.5 3.5 0 0 1 5 5l-8 8a2 2 0 0 1-3-3l7.5-7.5"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="1.8"
-                />
-              </svg>
-            </button>
             <div class="composer__field">
+              <div
+                class="document-list"
+                id="document-list"
+                aria-label="Attachments for the next message"
+                aria-live="polite"
+              ></div>
               <textarea
                 id="message-input"
                 name="message"
-                rows="1"
+                rows="2"
                 maxlength="100000"
                 placeholder="Ask a question, or paste a Fathom or Granola link…"
                 autocomplete="off"
                 required
               ></textarea>
-              <span class="character-count" id="character-count" aria-hidden="true">
-                0 / 100,000
-              </span>
+              <div class="composer__toolbar">
+                <div class="attachment-picker">
+                  <button
+                    class="attachment-button"
+                    id="attachment-menu-button"
+                    type="button"
+                    aria-label="Add an attachment"
+                    aria-haspopup="menu"
+                    aria-controls="attachment-menu"
+                    aria-expanded="false"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path
+                        d="M12 5v14M5 12h14"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-linecap="round"
+                        stroke-width="1.8"
+                      />
+                    </svg>
+                  </button>
+                  <div
+                    class="attachment-menu"
+                    id="attachment-menu"
+                    role="menu"
+                    aria-label="Add context"
+                    hidden
+                  >
+                    <button
+                      class="attachment-menu__item"
+                      id="upload-button"
+                      type="button"
+                      role="menuitem"
+                    >
+                      <span class="attachment-menu__icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24">
+                          <path
+                            d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Zm0 0v5h5M9 14h6m-6 3h4"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            stroke-width="1.7"
+                          />
+                        </svg>
+                      </span>
+                      <span>
+                        <strong>Upload a file</strong>
+                        <small>PDF, DOCX or TXT</small>
+                      </span>
+                    </button>
+                    <button
+                      class="attachment-menu__item"
+                      id="paste-button"
+                      type="button"
+                      role="menuitem"
+                    >
+                      <span class="attachment-menu__icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24">
+                          <path
+                            d="M9 5h6m-7 2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2v-2m3-9v6m-3-3h6M9 3h6v4H9V3Z"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            stroke-width="1.7"
+                          />
+                        </svg>
+                      </span>
+                      <span>
+                        <strong>Paste long text</strong>
+                        <small>Transcript or meeting notes</small>
+                      </span>
+                    </button>
+                  </div>
+                </div>
+                <p class="document-status" id="document-status" role="status"></p>
+                <span
+                  class="character-count"
+                  id="character-count"
+                  aria-hidden="true"
+                >
+                  0 / 8000
+                </span>
+              </div>
+              <input
+                id="file-input"
+                type="file"
+                accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+                hidden
+              />
             </div>
             <button class="send-button" id="send-button" type="submit">
               <span id="send-button-label">Send</span>
@@ -164,5 +273,40 @@
         </div>
       </section>
     </main>
+
+    <dialog class="paste-dialog" id="paste-dialog">
+      <form class="paste-dialog__card" id="paste-form">
+        <div>
+          <p class="section-label">Add pasted context</p>
+          <h2>Paste a transcript or document</h2>
+          <p>
+            The text is prepared locally and sent to Claude with your next
+            request.
+          </p>
+        </div>
+        <label for="pasted-name">Document name</label>
+        <input
+          id="pasted-name"
+          name="pasted-name"
+          maxlength="120"
+          value="Pasted transcript"
+        />
+        <label for="pasted-text">Text</label>
+        <textarea
+          id="pasted-text"
+          name="pasted-text"
+          maxlength="150000"
+          rows="12"
+          placeholder="Paste up to 150,000 characters here…"
+          required
+        ></textarea>
+        <div class="paste-dialog__actions">
+          <button class="secondary-button" id="paste-cancel" type="button">
+            Cancel
+          </button>
+          <button class="send-button" type="submit">Add context</button>
+        </div>
+      </form>
+    </dialog>
   </body>
 </html>

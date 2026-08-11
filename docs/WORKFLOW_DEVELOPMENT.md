@@ -74,27 +74,15 @@ cp \
   n8n/workflows/00-start-here-project-partner.json
 ```
 
-Then validate with the pinned Docker runtime:
+Then validate:
 
 ```bash
-docker run --rm \
-  -v "$PWD:/workspace:ro" \
-  -w /workspace \
-  node:24.16.0-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a \
-  node scripts/validate-workflows.mjs
+node scripts/validate-workflows.mjs
 ```
 
-Run the smoke test for the phase the workflow affects. For current confirmation or skill paths:
-
-```bash
-./scripts/test-phase5.sh
-```
-
-For onboarding, import, diagnostics, or checklist changes:
-
-```bash
-./scripts/test-phase6.sh
-```
+Start the local project and manually exercise every affected path with non-secret
+sample input. For a write path, check altered, cross-conversation, expired,
+superseded, repeated, and simultaneous confirmations before sharing the change.
 
 ## Save the change
 
@@ -103,6 +91,6 @@ For onboarding, import, diagnostics, or checklist changes:
 3. Confirm `n8n/exports/`, `.env`, and `backups/` are not listed.
 4. Commit the single intended outcome.
 5. Push the branch and open a pull request.
-6. Include the exact smoke tests and n8n version in the pull-request description.
+6. Include the manual checks and n8n version in the pull-request description.
 
 If the diff is wrong, discard the canonical file change in GitHub Desktop. The ignored export copy remains available for another review.

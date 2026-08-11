@@ -8,7 +8,7 @@ At the end of this guide:
 - A five-step learner checklist will be visible beside the agent workflow.
 - The Claude API key will be stored only in n8n's encrypted credential store.
 - The browser chat will send messages through n8n to Claude.
-- Each browser conversation will have separate short-term memory.
+- Each browser conversation will have separate, restart-safe local memory.
 - Local tables will contain three starter tasks and the enabled skill bundle.
 - Creating or updating a task will require an exact, expiring confirmation.
 - A second, credential-free workflow will provide a safe local health check.
@@ -19,7 +19,7 @@ Allow about 15 minutes after the local stack is running.
 
 Complete [LOCAL_SETUP.md](LOCAL_SETUP.md), then confirm:
 
-- Docker Desktop is running.
+- The local services are running (`start.command` or `start-windows.cmd`).
 - The chat opens at [http://localhost:3000](http://localhost:3000).
 - n8n opens at [http://localhost:5678](http://localhost:5678).
 - A local n8n owner account has been created.
@@ -104,13 +104,13 @@ Open `00 - START HERE - Project Partner`. The sticky notes describe the read, pr
 | Part | What it does |
 | --- | --- |
 | **Chat Webhook** | Receives the private request from the chat gateway |
-| **Validate and Normalise** | Checks the session UUID, trims the message, and rejects empty or oversized input |
+| **Validate and Normalise** | Checks the request ID, session, agent, durable history, message, and bounded document context |
 | **Request Is Valid?** | Ensures only the valid branch can reach the agent |
 | **Route Confirmation** | Recognises only a complete `CONFIRM XXXXXXXX` message |
 | **Load Enabled Skills** | Reads the bundle compiled from `skills/enabled.txt` |
-| **Project Partner Agent** | Applies the assistant instructions and controls the number of model steps |
+| **Build Agent Context** | Separates saved history, the current instruction, documents, and enabled skills |
+| **Project Partner Agent** | Runs the Project Manager instructions and controls the number of model steps |
 | **Claude - Sonnet 4.6** | Calls Claude using the n8n credential |
-| **Conversation Memory** | Keeps six interactions for each browser session while n8n remains running |
 | **list_tasks** | Retrieves task facts through the reviewed read-only subworkflow |
 | **create_task** | Validates and stores a five-minute create proposal without changing tasks |
 | **update_task_status** | Validates and stores a five-minute status proposal without changing tasks |
@@ -129,8 +129,8 @@ Then:
 Keep the supplied safety and cost ceilings during the workshop:
 
 - 4 agent iterations.
-- 900 provider output tokens.
-- 50-second workflow timeout.
+- 2,200 provider output tokens.
+- 110-second workflow timeout.
 - 8,000-character response ceiling.
 - Streaming disabled for the synchronous chat contract.
 
@@ -155,7 +155,10 @@ This proves that n8n can run a published workflow. It deliberately does not call
 
 Double-click `diagnose.command` on macOS or `diagnose-windows.cmd` on Windows.
 
-The helper checks both services, the installed learner checklist, main workflow publication, the selected Anthropic credential, the credential-free validation path, and the health workflow. It never calls Claude or displays credential values.
+The helper checks the local services, the installed learner checklist, main
+workflow publication, the selected Anthropic credential, the credential-free
+validation path, and the health workflow. It never calls Claude or displays
+credential values.
 
 Resolve each yellow `[next]` line. Continue when it reports **All checks are green**.
 
@@ -180,12 +183,13 @@ A successful request follows this path:
 ```mermaid
 flowchart LR
     Browser["Browser chat"] --> Gateway["TypeScript gateway"]
+    Store[("Local SQLite chat history")] <--> Gateway
     Gateway --> Validate["n8n validation"]
     Validate --> Route{"Exact confirmation?"}
     Route -- No --> Skills["Enabled skills"]
     Skills --> Agent["Project Partner Agent"]
     Model["Claude Sonnet 4.6"] -. model .-> Agent
-    Memory["Session memory"] -. context .-> Agent
+    Validate -. saved conversation context .-> Agent
     Tasks["Read-only list_tasks tool"] -. local facts .-> Agent
     Agent --> Proposal["Proposal-only write tool"]
     Proposal --> Pending[("pending_actions")]
@@ -205,15 +209,19 @@ To change agent behaviour without editing the workflow, follow [CUSTOMISE_SKILLS
 
 ## Memory and restart behaviour
 
-The first release deliberately uses n8n Simple Memory so the lesson remains visual and small:
+The chat gateway owns durable conversation memory:
 
-- The latest six interactions are available to the agent.
-- Memory is isolated by the browser's `sessionId`.
-- Memory exists only inside the running n8n process.
-- Restarting or stopping n8n clears all conversation memory.
-- The workflow, owner account, and encrypted Anthropic credential still persist.
+- Every user and assistant message is stored in local plaintext SQLite.
+- The latest six complete turns that fit within 24,000 characters are supplied
+  to the agent.
+- History is isolated by conversation UUID and agent ID.
+- Restarting n8n or the chat gateway preserves the transcript and recent context.
+- **New conversation** intentionally starts without another chat's context.
 
-This is appropriate for local teaching, but it is not durable production storage. A later cloud phase must replace it before scaling to multiple n8n processes.
+The workflow deliberately has no Simple Memory connection. Adding it back would
+duplicate recent turns and make pre-restart behaviour differ from post-restart
+behaviour. This remains single-user local storage, not a production multi-user
+memory service.
 
 ## Troubleshooting
 
@@ -236,37 +244,10 @@ Validate workflow structure without starting n8n:
 node scripts/validate-workflows.mjs
 ```
 
-Run the complete isolated Phase 3 smoke test:
-
-```bash
-./scripts/test-phase3.sh
-```
-
-The smoke test creates a separate Docker project and a fake local Anthropic endpoint. It proves imports, publication, invalid-input blocking, the browser-to-agent path, memory isolation, output limits, and restart behaviour without consuming API credit.
-
-Run the Phase 4 task-tool smoke test:
-
-```bash
-./scripts/test-phase4.sh
-```
-
-It proves repeatable table setup, exact task reads, invalid-input rejection, idempotent creation, narrow status updates, complete audit rows, and the agent's read-only tool path.
-
-Run the Phase 5 skills and confirmation smoke test:
-
-```bash
-./scripts/test-phase5.sh
-```
-
-It proves enabled-only skill loading, proposal-only model tools, exact session binding, expiry, supersession, single use, simultaneous retry protection, and the absence of destructive tools.
-
-Run the Phase 6 beginner-package smoke test:
-
-```bash
-./scripts/test-phase6.sh
-```
-
-It creates a fresh template-style copy and proves one-click setup, automatic import, repeatable fallback import, preservation of local workflow edits, both diagnostic states, and backup/reset/restore.
+After validation, use a throwaway local conversation to manually check the
+workflow path you changed. For a write path, verify that the agent proposes the
+exact action, rejects plain `yes`, accepts only the generated confirmation code,
+and performs the action once.
 
 Export timestamped copies of visually edited workflows:
 

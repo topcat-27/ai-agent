@@ -46,7 +46,7 @@ The three starter tasks have stable `requestId` values. Re-running import insert
 | `result` | JSON snapshot of the structured result |
 | `error` | Understandable error message, or empty on success |
 
-Audit rows are operational records, not conversation memory. They persist across normal Docker restarts and are included in local backups.
+Audit rows are operational records, not conversation memory. They persist across normal restarts and are included in local backups.
 
 ## The workflow set
 
@@ -121,30 +121,15 @@ When adding a new project-management tool:
 7. Insert a `tool_audit` record on success and failure.
 8. Add idempotency to every write.
 9. Keep HTTP Request, SQL, Execute Command, and filesystem nodes outside model-callable tools.
-10. Add structural and runtime tests before connecting the tool.
+10. Validate the workflow and manually exercise success and failure paths before connecting the tool.
 11. Classify the tool as `read`, `write`, or `destructive`.
 12. Never connect a write until the confirmation policy covers its exact arguments.
 
 Delete, archive, bulk-write, arbitrary SQL, arbitrary HTTP, shell, and filesystem tools remain outside the local release.
 
-## Automated verification
+## Manual verification
 
-Run:
-
-```bash
-./scripts/test-phase4.sh
-```
-
-The test uses a separate Docker project and a fake Anthropic endpoint. It verifies:
-
-- Workflow import in n8n 2.30.5.
-- Repeatable setup without duplicate samples.
-- Exact list results and filter validation.
-- Empty and oversized create rejection.
-- Idempotent task creation and conflict handling.
-- Invalid, missing, successful, and repeated status updates.
-- Complete audit records.
-- The browser-to-agent-to-`list_tasks` path.
-- Model-visible create and update names resolve only to proposal workflows.
-
-Run `./scripts/test-phase5.sh` for the confirmation, expiry, single-use, skill-loading, and destructive-tool checks.
+Run `node scripts/validate-workflows.mjs`, then use a throwaway local project and
+conversation to check valid input, rejected input, repeated requests,
+confirmation expiry, single use, audit records, and the final task state. Never
+use real learner data for this check.

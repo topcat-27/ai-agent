@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import {
@@ -7,8 +8,25 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
-import { extname, resolve, sep } from "node:path";
-
+import { basename, extname, resolve, sep } from "node:path";
+import Busboy from "busboy";
+import {
+  DEFAULT_AGENTS,
+  publicAgentDefinitions,
+  type AgentDefinition,
+} from "./agents.js";
+import {
+  DocumentStore,
+  DocumentStoreError,
+  MAX_FILE_BYTES,
+  MAX_PASTED_CHARACTERS,
+  type DocumentRecord,
+} from "./documents.js";
+import {
+  ChatStore,
+  type HistoryMessage,
+  type StoredAttachment,
+} from "./chat-store.js";
 import {
   ExtractionError,
   UnsupportedFileError,
@@ -23,20 +41,20 @@ import {
   ingestUrl,
 } from "./ingest.js";
 
-// The message limit is large enough to carry a meeting transcript in one send,
-// so extracted transcripts (from files or links) reach the agent intact.
+// A pasted meeting transcript is sent as one message, so the limit is well
+// above the upstream default.
 const MAX_MESSAGE_LENGTH = 100_000;
 const MAX_REQUEST_BYTES = 1_048_576;
 const MAX_UPSTREAM_BYTES = 65_536;
-// Uploads are read as base64 JSON, which inflates the raw file by ~33%. The raw
-// file is capped at 10 MB; the JSON body is allowed a little more for overhead.
+// Uploads are read as base64 JSON, which inflates the raw file by ~33%.
 const MAX_UPLOAD_FILE_BYTES = 10 * 1_024 * 1_024;
 const MAX_UPLOAD_BODY_BYTES = 15 * 1_024 * 1_024;
-// Extracted transcripts are capped at the message limit so an inserted
-// transcript never exceeds what a single send can carry.
 const MAX_TRANSCRIPT_LENGTH = MAX_MESSAGE_LENGTH;
 const MAX_FILENAME_LENGTH = 255;
 const MAX_URL_LENGTH = 2_048;
+const MAX_ASANA_TASKS = 50;
+const GID_PATTERN = /^\d+$/;
+const DUE_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -61,23 +79,55 @@ type ErrorCode =
   | "AGENT_ERROR"
   | "AGENT_TIMEOUT"
   | "AGENT_UNAVAILABLE"
-  | "EXTRACTION_FAILED"
-  | "FETCH_FAILED"
+  | "CHAT_HISTORY_ERROR"
+  | "CONVERSATION_NOT_FOUND"
+  | "DOCUMENT_ERROR"
+  | "DOCUMENT_NOT_FOUND"
+  | "DOCUMENT_SERVICE_UNAVAILABLE"
+  | "DOCUMENT_TEXT_TOO_LARGE"
   | "FILE_TOO_LARGE"
   | "INVALID_REQUEST"
-  | "ASANA_ERROR"
-  | "ASANA_UNAVAILABLE"
   | "MESSAGE_TOO_LONG"
   | "RATE_LIMITED"
+  | "REQUEST_IN_PROGRESS"
+  | "TOO_MANY_DOCUMENTS"
+  | "UNSUPPORTED_FILE_TYPE"
+  | "ASANA_ERROR"
+  | "ASANA_UNAVAILABLE"
+  | "EXTRACTION_FAILED"
+  | "FETCH_FAILED"
   | "UNSUPPORTED_FILE"
   | "UNSUPPORTED_SOURCE";
 
 interface ChatRequest {
+  requestId: string;
   sessionId: string;
+  agentId: string;
   message: string;
+  documentIds: string[];
+}
+
+interface UpstreamChatRequest {
+  schemaVersion: 3;
+  requestId: string;
+  sessionId: string;
+  agentId: string;
+  message: string;
+  history: HistoryMessage[];
+  documents: Array<{
+    id: string;
+    name: string;
+    type: DocumentRecord["type"];
+    wordCount: number;
+    characterCount: number;
+    text: string;
+    pageCount?: number;
+  }>;
 }
 
 interface ChatResponse {
+  requestId?: string;
+  messageId?: string;
   sessionId: string;
   reply: string;
   runId?: string;
@@ -93,6 +143,9 @@ export interface ChatGatewayOptions {
   timeoutMs?: number;
   fetchImplementation?: typeof fetch;
   logError?: (message: string, error?: unknown) => void;
+  agents?: readonly AgentDefinition[];
+  documentStore?: DocumentStore;
+  chatStore?: ChatStore;
 }
 
 class PublicError extends Error {
@@ -136,7 +189,10 @@ function sendError(response: ServerResponse, error: PublicError): void {
   );
 }
 
-async function readRequestBody(request: IncomingMessage): Promise<unknown> {
+async function readRequestBody(
+  request: IncomingMessage,
+  maximumBytes = MAX_REQUEST_BYTES,
+): Promise<unknown> {
   const contentType = request.headers["content-type"] ?? "";
   if (!/^application\/json(?:\s*;|$)/i.test(contentType)) {
     throw new PublicError(
@@ -152,11 +208,11 @@ async function readRequestBody(request: IncomingMessage): Promise<unknown> {
   for await (const rawChunk of request) {
     const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
     totalBytes += chunk.length;
-    if (totalBytes > MAX_REQUEST_BYTES) {
+    if (totalBytes > maximumBytes) {
       throw new PublicError(
         413,
         "MESSAGE_TOO_LONG",
-        "That message is too long. Keep it under 4,000 characters.",
+        "That request is too large.",
       );
     }
     chunks.push(chunk);
@@ -173,7 +229,21 @@ async function readRequestBody(request: IncomingMessage): Promise<unknown> {
   }
 }
 
-function validateChatRequest(body: unknown): ChatRequest {
+function validateSessionId(value: unknown): string {
+  if (typeof value !== "string" || !UUID_PATTERN.test(value)) {
+    throw new PublicError(
+      400,
+      "INVALID_REQUEST",
+      "The conversation could not be identified. Reset it and try again.",
+    );
+  }
+  return value;
+}
+
+function validateChatRequest(
+  body: unknown,
+  agents: readonly AgentDefinition[],
+): ChatRequest {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     throw new PublicError(
       400,
@@ -183,14 +253,25 @@ function validateChatRequest(body: unknown): ChatRequest {
   }
 
   const candidate = body as Record<string, unknown>;
-  const sessionId = candidate.sessionId;
+  const sessionId = validateSessionId(candidate.sessionId);
+  const requestId =
+    candidate.requestId === undefined
+      ? randomUUID()
+      : validateSessionId(candidate.requestId);
+  const rawAgentId =
+    typeof candidate.agentId === "string"
+      ? candidate.agentId.trim()
+      : "project-manager";
   const rawMessage = candidate.message;
+  const rawDocumentIds =
+    candidate.documentIds === undefined ? [] : candidate.documentIds;
 
-  if (typeof sessionId !== "string" || !UUID_PATTERN.test(sessionId)) {
+  const agent = agents.find((item) => item.id === rawAgentId);
+  if (!agent || agent.status !== "active") {
     throw new PublicError(
       400,
       "INVALID_REQUEST",
-      "The conversation could not be identified. Reset it and try again.",
+      "That agent is not available yet.",
     );
   }
 
@@ -215,19 +296,213 @@ function validateChatRequest(body: unknown): ChatRequest {
     throw new PublicError(
       413,
       "MESSAGE_TOO_LONG",
-      "That message is too long. Keep it under 4,000 characters.",
+      "That instruction is too long. Keep it under 100,000 characters.",
     );
   }
 
-  return { sessionId, message };
+  if (
+    !Array.isArray(rawDocumentIds) ||
+    !rawDocumentIds.every((id) => typeof id === "string")
+  ) {
+    throw new PublicError(
+      400,
+      "INVALID_REQUEST",
+      "The attached document list is invalid.",
+    );
+  }
+
+  return {
+    requestId,
+    sessionId,
+    agentId: agent.id,
+    message,
+    documentIds: rawDocumentIds,
+  };
 }
+
+interface UploadedFile {
+  sessionId: string;
+  fileName: string;
+  mimeType: string;
+  buffer: Buffer;
+}
+
+async function readMultipartUpload(
+  request: IncomingMessage,
+): Promise<UploadedFile> {
+  const contentType = request.headers["content-type"] ?? "";
+  if (!contentType.toLowerCase().startsWith("multipart/form-data;")) {
+    throw new PublicError(
+      400,
+      "INVALID_REQUEST",
+      "Upload the document using the file picker.",
+    );
+  }
+
+  return await new Promise<UploadedFile>((resolveUpload, rejectUpload) => {
+    let parser: ReturnType<typeof Busboy>;
+    try {
+      parser = Busboy({
+        headers: request.headers,
+        limits: {
+          fields: 2,
+          files: 1,
+          fileSize: MAX_FILE_BYTES,
+          parts: 3,
+        },
+      });
+    } catch {
+      rejectUpload(
+        new PublicError(
+          400,
+          "INVALID_REQUEST",
+          "The uploaded document could not be read.",
+        ),
+      );
+      return;
+    }
+
+    let settled = false;
+    let sessionId = "";
+    let fileName = "";
+    let mimeType = "";
+    let fileSeen = false;
+    let fileTooLarge = false;
+    const chunks: Buffer[] = [];
+
+    const fail = (error: PublicError) => {
+      if (!settled) {
+        settled = true;
+        rejectUpload(error);
+      }
+    };
+
+    parser.on("field", (name, value) => {
+      if (name === "sessionId") {
+        sessionId = value;
+      }
+    });
+    parser.on("file", (fieldName, stream, info) => {
+      if (fieldName !== "file" || fileSeen) {
+        stream.resume();
+        return;
+      }
+      fileSeen = true;
+      fileName = basename(info.filename || "document");
+      mimeType = info.mimeType || "application/octet-stream";
+      stream.on("limit", () => {
+        fileTooLarge = true;
+      });
+      stream.on("data", (chunk: Buffer) => {
+        chunks.push(Buffer.from(chunk));
+      });
+      stream.on("error", () => {
+        fail(
+          new PublicError(
+            400,
+            "INVALID_REQUEST",
+            "The uploaded document could not be read.",
+          ),
+        );
+      });
+    });
+    parser.on("partsLimit", () => {
+      fail(
+        new PublicError(
+          400,
+          "INVALID_REQUEST",
+          "Upload one document at a time.",
+        ),
+      );
+    });
+    parser.on("filesLimit", () => {
+      fail(
+        new PublicError(
+          400,
+          "INVALID_REQUEST",
+          "Upload one document at a time.",
+        ),
+      );
+    });
+    parser.on("error", () => {
+      fail(
+        new PublicError(
+          400,
+          "INVALID_REQUEST",
+          "The uploaded document could not be read.",
+        ),
+      );
+    });
+    parser.on("finish", () => {
+      if (settled) {
+        return;
+      }
+      if (fileTooLarge) {
+        fail(
+          new PublicError(
+            413,
+            "FILE_TOO_LARGE",
+            "Files must be 20 MB or smaller.",
+          ),
+        );
+        return;
+      }
+      if (!fileSeen || chunks.length === 0) {
+        fail(
+          new PublicError(
+            400,
+            "INVALID_REQUEST",
+            "Choose a PDF, DOCX, or text file.",
+          ),
+        );
+        return;
+      }
+      try {
+        settled = true;
+        resolveUpload({
+          sessionId: validateSessionId(sessionId),
+          fileName,
+          mimeType,
+          buffer: Buffer.concat(chunks),
+        });
+      } catch (error) {
+        settled = true;
+        rejectUpload(error);
+      }
+    });
+
+    request.pipe(parser);
+  });
+}
+
+function asPublicError(error: DocumentStoreError): PublicError {
+  const supportedCode: ErrorCode =
+    error.code === "DOCUMENT_NOT_FOUND"
+      ? "DOCUMENT_NOT_FOUND"
+      : error.code === "DOCUMENT_SERVICE_UNAVAILABLE"
+        ? "DOCUMENT_SERVICE_UNAVAILABLE"
+        : error.code === "DOCUMENT_TEXT_TOO_LARGE"
+          ? "DOCUMENT_TEXT_TOO_LARGE"
+          : error.code === "FILE_TOO_LARGE"
+            ? "FILE_TOO_LARGE"
+            : error.code === "TOO_MANY_DOCUMENTS"
+              ? "TOO_MANY_DOCUMENTS"
+              : error.code === "UNSUPPORTED_FILE_TYPE"
+                ? "UNSUPPORTED_FILE_TYPE"
+                : "DOCUMENT_ERROR";
+  return new PublicError(error.status, supportedCode, error.publicMessage);
+}
+
+// --- Transcript ingest and Asana capture -------------------------------
+// These endpoints extract plain text locally and propose Asana tasks. Nothing
+// is written to Asana until a person approves it in the review panel.
 
 interface UploadInput {
   filename: string;
   buffer: Buffer;
 }
 
-interface UploadResponse {
+interface TranscriptResponse {
   filename: string;
   characters: number;
   truncated: boolean;
@@ -237,16 +512,11 @@ interface UploadResponse {
 async function readUploadBody(request: IncomingMessage): Promise<unknown> {
   const contentType = request.headers["content-type"] ?? "";
   if (!/^application\/json(?:\s*;|$)/i.test(contentType)) {
-    throw new PublicError(
-      400,
-      "INVALID_REQUEST",
-      "Send the file as JSON and try again.",
-    );
+    throw new PublicError(400, "INVALID_REQUEST", "Send the file as JSON and try again.");
   }
 
   const chunks: Buffer[] = [];
   let totalBytes = 0;
-
   for await (const rawChunk of request) {
     const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
     totalBytes += chunk.length;
@@ -273,25 +543,15 @@ async function readUploadBody(request: IncomingMessage): Promise<unknown> {
 
 function validateUploadRequest(body: unknown): UploadInput {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
-    throw new PublicError(
-      400,
-      "INVALID_REQUEST",
-      "Choose a file and try again.",
-    );
+    throw new PublicError(400, "INVALID_REQUEST", "Choose a file and try again.");
   }
 
   const candidate = body as Record<string, unknown>;
   const filename =
     typeof candidate.filename === "string" ? candidate.filename.trim() : "";
-
   if (filename.length === 0 || filename.length > MAX_FILENAME_LENGTH) {
-    throw new PublicError(
-      400,
-      "INVALID_REQUEST",
-      "Choose a file and try again.",
-    );
+    throw new PublicError(400, "INVALID_REQUEST", "Choose a file and try again.");
   }
-
   if (!isSupportedExtension(extensionFor(filename))) {
     throw new PublicError(
       415,
@@ -302,23 +562,14 @@ function validateUploadRequest(body: unknown): UploadInput {
 
   const dataBase64 =
     typeof candidate.dataBase64 === "string" ? candidate.dataBase64 : "";
-  if (dataBase64.length === 0) {
-    throw new PublicError(
-      400,
-      "INVALID_REQUEST",
-      "That file was empty. Choose another file.",
-    );
-  }
-
   const buffer = Buffer.from(dataBase64, "base64");
-  if (buffer.length === 0) {
+  if (dataBase64.length === 0 || buffer.length === 0) {
     throw new PublicError(
       400,
       "INVALID_REQUEST",
       "That file was empty. Choose another file.",
     );
   }
-
   if (buffer.length > MAX_UPLOAD_FILE_BYTES) {
     throw new PublicError(
       413,
@@ -330,7 +581,7 @@ function validateUploadRequest(body: unknown): UploadInput {
   return { filename, buffer };
 }
 
-async function buildTranscript(input: UploadInput): Promise<UploadResponse> {
+async function buildTranscript(input: UploadInput): Promise<TranscriptResponse> {
   let transcript: string;
   try {
     transcript = await extractTranscript(input.filename, input.buffer);
@@ -346,7 +597,7 @@ async function buildTranscript(input: UploadInput): Promise<UploadResponse> {
       throw new PublicError(
         422,
         "EXTRACTION_FAILED",
-        "We couldn't read text from that file. Scanned or password-protected PDFs are not supported — try a text-based PDF or a .docx.",
+        "We couldn't read text from that file. Scanned or password-protected PDFs are not supported.",
       );
     }
     throw error;
@@ -356,62 +607,48 @@ async function buildTranscript(input: UploadInput): Promise<UploadResponse> {
     throw new PublicError(
       422,
       "EXTRACTION_FAILED",
-      "We couldn't find any text in that file. It may contain only scanned images. Try a text-based file.",
+      "We couldn't find any text in that file. Try a text-based file.",
     );
   }
 
   const truncated = transcript.length > MAX_TRANSCRIPT_LENGTH;
-  const text = truncated
-    ? transcript.slice(0, MAX_TRANSCRIPT_LENGTH)
-    : transcript;
-
-  return {
-    filename: input.filename,
-    characters: text.length,
-    truncated,
-    text,
-  };
-}
-
-interface IngestResponse {
-  source: string;
-  title: string;
-  characters: number;
-  truncated: boolean;
-  text: string;
+  const text = truncated ? transcript.slice(0, MAX_TRANSCRIPT_LENGTH) : transcript;
+  return { filename: input.filename, characters: text.length, truncated, text };
 }
 
 function validateIngestRequest(body: unknown): string {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     throw new PublicError(400, "INVALID_REQUEST", "Paste a link and try again.");
   }
-
   const candidate = body as Record<string, unknown>;
-  const url = typeof candidate.url === "string" ? candidate.url.trim() : "";
-
-  if (url.length === 0 || url.length > MAX_URL_LENGTH) {
+  const linkUrl = typeof candidate.url === "string" ? candidate.url.trim() : "";
+  if (linkUrl.length === 0 || linkUrl.length > MAX_URL_LENGTH) {
     throw new PublicError(400, "INVALID_REQUEST", "Paste a link and try again.");
   }
-
-  if (detectSource(url) === null) {
+  if (detectSource(linkUrl) === null) {
     throw new PublicError(
       415,
       "UNSUPPORTED_SOURCE",
       "That link is not supported. Paste a Fathom share link or a Granola notes link.",
     );
   }
-
-  return url;
+  return linkUrl;
 }
 
 async function buildIngestResponse(
-  url: string,
+  linkUrl: string,
   fetchImplementation: typeof fetch,
   timeoutMs: number,
-): Promise<IngestResponse> {
+): Promise<{
+  source: string;
+  title: string;
+  characters: number;
+  truncated: boolean;
+  text: string;
+}> {
   let result;
   try {
-    result = await ingestUrl(url, { fetchImplementation, timeoutMs });
+    result = await ingestUrl(linkUrl, { fetchImplementation, timeoutMs });
   } catch (error) {
     if (error instanceof UnsupportedSourceError) {
       throw new PublicError(415, "UNSUPPORTED_SOURCE", error.message);
@@ -428,7 +665,6 @@ async function buildIngestResponse(
 
   const truncated = result.text.length > MAX_TRANSCRIPT_LENGTH;
   const text = truncated ? result.text.slice(0, MAX_TRANSCRIPT_LENGTH) : result.text;
-
   return {
     source: result.source,
     title: result.title,
@@ -438,27 +674,13 @@ async function buildIngestResponse(
   };
 }
 
-const MAX_ASANA_TASKS = 50;
-const GID_PATTERN = /^\d+$/;
-const DUE_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-
 interface AsanaCreatePayload {
   mode: "flat" | "grouped";
   projectGid: string;
   meetingTitle: string;
-  tasks: {
-    title: string;
-    notes: string;
-    assigneeGid: string;
-    dueOn: string;
-  }[];
+  tasks: { title: string; notes: string; assigneeGid: string; dueOn: string }[];
 }
 
-/**
- * Validates the review panel's push request before it reaches n8n. The n8n
- * workflow re-validates everything; this layer exists to reject obvious
- * mistakes with a friendly message and to keep malformed input off the wire.
- */
 function validateAsanaCreateRequest(body: unknown): AsanaCreatePayload {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     throw new PublicError(400, "INVALID_REQUEST", "Nothing to push. Select at least one task.");
@@ -517,14 +739,13 @@ function validateAsanaCreateRequest(body: unknown): AsanaCreatePayload {
   };
 }
 
-/** Calls an n8n Asana webhook and returns its parsed JSON, mapping failures safely. */
 async function callAsanaWebhook(
-  url: string | undefined,
+  webhookUrl: string | undefined,
   payload: unknown,
   fetchImplementation: typeof fetch,
   timeoutMs: number,
 ): Promise<unknown> {
-  if (!url) {
+  if (!webhookUrl) {
     throw new PublicError(
       503,
       "ASANA_UNAVAILABLE",
@@ -536,13 +757,13 @@ async function callAsanaWebhook(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let response: Response;
   try {
-    response = await fetchImplementation(url, {
+    response = await fetchImplementation(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
-  } catch (error) {
+  } catch {
     if (controller.signal.aborted) {
       throw new PublicError(504, "AGENT_TIMEOUT", "Asana took too long to respond. Try again.");
     }
@@ -572,8 +793,7 @@ async function callAsanaWebhook(
   }
 
   if (!response.ok) {
-    // Surface the workflow's own validation message, never raw provider detail.
-    const errorBody = parsed as { error?: { code?: unknown; message?: unknown } };
+    const errorBody = parsed as { error?: { message?: unknown } };
     const message =
       typeof errorBody?.error?.message === "string"
         ? errorBody.error.message
@@ -645,6 +865,9 @@ function validateUpstreamResponse(
 
 async function callAgent(
   request: ChatRequest,
+  agent: AgentDefinition,
+  documents: DocumentRecord[],
+  history: HistoryMessage[],
   options: Required<
     Pick<ChatGatewayOptions, "fetchImplementation" | "timeoutMs" | "upstreamUrl">
   >,
@@ -654,10 +877,38 @@ async function callAgent(
   let upstreamResponse: Response;
 
   try {
-    upstreamResponse = await options.fetchImplementation(options.upstreamUrl, {
+    const configuredUrl = new URL(options.upstreamUrl);
+    const upstreamUrl =
+      configuredUrl.pathname === agent.workflowPath
+        ? configuredUrl
+        : new URL(
+            agent.workflowPath,
+            `${configuredUrl.protocol}//${configuredUrl.host}`,
+          );
+    const upstreamRequest: UpstreamChatRequest = {
+      schemaVersion: 3,
+      requestId: request.requestId,
+      sessionId: request.sessionId,
+      agentId: request.agentId,
+      message: request.message,
+      history,
+      documents: documents.map((document) => ({
+        id: document.id,
+        name: document.name,
+        type: document.type,
+        wordCount: document.wordCount,
+        characterCount: document.characterCount,
+        text: document.text,
+        ...(document.pageCount === undefined
+          ? {}
+          : { pageCount: document.pageCount }),
+      })),
+    };
+
+    upstreamResponse = await options.fetchImplementation(upstreamUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(request),
+      body: JSON.stringify(upstreamRequest),
       signal: controller.signal,
     });
   } catch (error) {
@@ -760,9 +1011,83 @@ async function serveStaticFile(
   }
 }
 
+function queryLimit(
+  value: string | null,
+  fallback: number,
+  maximum: number,
+): number {
+  if (value === null) {
+    return fallback;
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
+    throw new PublicError(
+      400,
+      "INVALID_REQUEST",
+      `Limit must be a whole number from 1 to ${maximum}.`,
+    );
+  }
+  return parsed;
+}
+
+function activeAgentFor(
+  value: unknown,
+  agents: readonly AgentDefinition[],
+): AgentDefinition {
+  const id = typeof value === "string" ? value.trim() : "project-manager";
+  const agent = agents.find(
+    (candidate) => candidate.id === id && candidate.status === "active",
+  );
+  if (!agent) {
+    throw new PublicError(
+      400,
+      "INVALID_REQUEST",
+      "That agent is not available yet.",
+    );
+  }
+  return agent;
+}
+
+function attachmentSnapshot(document: DocumentRecord): StoredAttachment {
+  return {
+    documentId: document.id,
+    name: document.name,
+    type: document.type,
+    mimeType: document.mimeType,
+    wordCount: document.wordCount,
+    characterCount: document.characterCount,
+    expiresAt: document.expiresAt,
+    ...(document.pageCount === undefined
+      ? {}
+      : { pageCount: document.pageCount }),
+  };
+}
+
+function publicConversationPage(
+  page: NonNullable<ReturnType<ChatStore["getConversationPage"]>>,
+): unknown {
+  const now = Date.now();
+  return {
+    ...page,
+    messages: page.messages.map((message) => ({
+      ...message,
+      attachments: message.attachments.map((attachment) => ({
+        ...attachment,
+        expired: Date.parse(attachment.expiresAt) <= now,
+      })),
+    })),
+  };
+}
+
 export function createChatHandler(options: ChatGatewayOptions): RequestListener {
   const timeoutMs = options.timeoutMs ?? 60_000;
   const fetchImplementation = options.fetchImplementation ?? fetch;
+  const agents = options.agents ?? DEFAULT_AGENTS;
+  const documentStore = options.documentStore;
+  if (!options.chatStore) {
+    throw new Error("Chat history store is required.");
+  }
+  const chatStore = options.chatStore;
 
   return (request, response) => {
     void (async () => {
@@ -782,40 +1107,471 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
         return;
       }
 
-      if (url.pathname === "/api/chat") {
-        if (request.method !== "POST") {
-          sendJson(response, 405, {
-            error: {
-              code: "INVALID_REQUEST",
-              message: "Send chat messages with POST.",
+      if (url.pathname === "/api/agents") {
+        if (request.method !== "GET") {
+          sendJson(
+            response,
+            405,
+            {
+              error: {
+                code: "INVALID_REQUEST",
+                message: "That method is not supported.",
+              },
             },
-          }, { Allow: "POST" });
+            { Allow: "GET" },
+          );
+          return;
+        }
+        sendJson(response, 200, {
+          schemaVersion: 1,
+          agents: publicAgentDefinitions(agents),
+        });
+        return;
+      }
+
+      if (url.pathname === "/api/conversations/search") {
+        if (request.method !== "GET") {
+          sendJson(
+            response,
+            405,
+            {
+              error: {
+                code: "INVALID_REQUEST",
+                message: "Search conversations with GET.",
+              },
+            },
+            { Allow: "GET" },
+          );
+          return;
+        }
+        try {
+          const query = (url.searchParams.get("q") ?? "").trim();
+          if (query.length === 0 || query.length > 200) {
+            throw new PublicError(
+              400,
+              "INVALID_REQUEST",
+              "Search for between 1 and 200 characters.",
+            );
+          }
+          const limit = queryLimit(url.searchParams.get("limit"), 50, 100);
+          sendJson(response, 200, {
+            results: chatStore.search(query, limit),
+          });
+        } catch (error) {
+          if (error instanceof PublicError) {
+            sendError(response, error);
+          } else {
+            options.logError?.("Could not search chat history", error);
+            sendError(
+              response,
+              new PublicError(
+                500,
+                "CHAT_HISTORY_ERROR",
+                "Chat history could not be searched. Try again.",
+              ),
+            );
+          }
+        }
+        return;
+      }
+
+      if (url.pathname === "/api/conversations") {
+        try {
+          if (request.method === "GET") {
+            const limit = queryLimit(url.searchParams.get("limit"), 50, 100);
+            let page;
+            try {
+              page = chatStore.listConversations(
+                limit,
+                url.searchParams.get("cursor") ?? undefined,
+              );
+            } catch {
+              throw new PublicError(
+                400,
+                "INVALID_REQUEST",
+                "That conversation page is invalid. Refresh and try again.",
+              );
+            }
+            sendJson(response, 200, page);
+            return;
+          }
+          if (request.method === "POST") {
+            const body = await readRequestBody(request);
+            if (
+              typeof body !== "object" ||
+              body === null ||
+              Array.isArray(body)
+            ) {
+              throw new PublicError(
+                400,
+                "INVALID_REQUEST",
+                "The conversation could not be created.",
+              );
+            }
+            const agent = activeAgentFor(
+              (body as Record<string, unknown>).agentId,
+              agents,
+            );
+            const conversation = chatStore.createConversation(
+              randomUUID(),
+              agent.id,
+            );
+            sendJson(response, 201, { conversation });
+            return;
+          }
+          sendJson(
+            response,
+            405,
+            {
+              error: {
+                code: "INVALID_REQUEST",
+                message: "That method is not supported.",
+              },
+            },
+            { Allow: "GET, POST" },
+          );
+        } catch (error) {
+          if (error instanceof PublicError) {
+            sendError(response, error);
+          } else {
+            options.logError?.("Could not manage conversations", error);
+            sendError(
+              response,
+              new PublicError(
+                500,
+                "CHAT_HISTORY_ERROR",
+                "Chat history is not available. Restart the local app and try again.",
+              ),
+            );
+          }
+        }
+        return;
+      }
+
+      if (url.pathname.startsWith("/api/conversations/")) {
+        try {
+          const rawId = url.pathname.slice("/api/conversations/".length);
+          if (rawId.length === 0 || rawId.includes("/")) {
+            throw new PublicError(
+              404,
+              "CONVERSATION_NOT_FOUND",
+              "That conversation could not be found.",
+            );
+          }
+          let conversationId: string;
+          try {
+            conversationId = validateSessionId(decodeURIComponent(rawId));
+          } catch {
+            throw new PublicError(
+              404,
+              "CONVERSATION_NOT_FOUND",
+              "That conversation could not be found.",
+            );
+          }
+
+          if (request.method === "GET") {
+            const limit = queryLimit(url.searchParams.get("limit"), 100, 200);
+            const rawBefore = url.searchParams.get("before");
+            const before = rawBefore === null ? undefined : Number(rawBefore);
+            if (
+              before !== undefined &&
+              (!Number.isSafeInteger(before) || before < 1)
+            ) {
+              throw new PublicError(
+                400,
+                "INVALID_REQUEST",
+                "That message page is invalid. Refresh and try again.",
+              );
+            }
+            const page = chatStore.getConversationPage(
+              conversationId,
+              limit,
+              before,
+            );
+            if (!page) {
+              throw new PublicError(
+                404,
+                "CONVERSATION_NOT_FOUND",
+                "That conversation could not be found.",
+              );
+            }
+            sendJson(response, 200, publicConversationPage(page));
+            return;
+          }
+
+          if (request.method === "PATCH") {
+            const body = await readRequestBody(request);
+            const rawTitle =
+              typeof body === "object" &&
+              body !== null &&
+              !Array.isArray(body)
+                ? (body as Record<string, unknown>).title
+                : undefined;
+            const title =
+              typeof rawTitle === "string"
+                ? rawTitle.replace(/\s+/g, " ").trim()
+                : "";
+            if (title.length === 0 || title.length > 80) {
+              throw new PublicError(
+                400,
+                "INVALID_REQUEST",
+                "Conversation titles must be between 1 and 80 characters.",
+              );
+            }
+            const conversation = chatStore.renameConversation(
+              conversationId,
+              title,
+            );
+            if (!conversation) {
+              throw new PublicError(
+                404,
+                "CONVERSATION_NOT_FOUND",
+                "That conversation could not be found.",
+              );
+            }
+            sendJson(response, 200, { conversation });
+            return;
+          }
+
+          if (request.method === "DELETE") {
+            if (!chatStore.deleteConversation(conversationId)) {
+              throw new PublicError(
+                404,
+                "CONVERSATION_NOT_FOUND",
+                "That conversation could not be found.",
+              );
+            }
+            response.writeHead(204, {
+              ...SECURITY_HEADERS,
+              "Cache-Control": "no-store",
+            });
+            response.end();
+            return;
+          }
+
+          sendJson(
+            response,
+            405,
+            {
+              error: {
+                code: "INVALID_REQUEST",
+                message: "That method is not supported.",
+              },
+            },
+            { Allow: "GET, PATCH, DELETE" },
+          );
+        } catch (error) {
+          if (error instanceof PublicError) {
+            sendError(response, error);
+          } else {
+            options.logError?.("Could not manage conversation", error);
+            sendError(
+              response,
+              new PublicError(
+                500,
+                "CHAT_HISTORY_ERROR",
+                "Chat history is not available. Restart the local app and try again.",
+              ),
+            );
+          }
+        }
+        return;
+      }
+
+      if (url.pathname === "/api/documents/text") {
+        if (request.method !== "POST") {
+          sendJson(
+            response,
+            405,
+            {
+              error: {
+                code: "INVALID_REQUEST",
+                message: "Add pasted text with POST.",
+              },
+            },
+            { Allow: "POST" },
+          );
+          return;
+        }
+        if (!documentStore) {
+          sendError(
+            response,
+            new PublicError(
+              503,
+              "DOCUMENT_SERVICE_UNAVAILABLE",
+              "The local document reader is not configured.",
+            ),
+          );
           return;
         }
 
         try {
-          const body = await readRequestBody(request);
-          const chatRequest = validateChatRequest(body);
-          const chatResponse = await callAgent(chatRequest, {
-            fetchImplementation,
-            timeoutMs,
-            upstreamUrl: options.upstreamUrl,
-          });
-          sendJson(response, 200, chatResponse);
-        } catch (error) {
-          if (error instanceof PublicError) {
-            sendError(response, error);
-            return;
+          await documentStore.cleanupExpired();
+          const body = await readRequestBody(
+            request,
+            MAX_PASTED_CHARACTERS * 4 + 4_096,
+          );
+          if (
+            typeof body !== "object" ||
+            body === null ||
+            Array.isArray(body)
+          ) {
+            throw new PublicError(
+              400,
+              "INVALID_REQUEST",
+              "Paste some transcript or document text first.",
+            );
           }
-          options.logError?.("Unexpected chat gateway error", error);
+          const candidate = body as Record<string, unknown>;
+          const sessionId = validateSessionId(candidate.sessionId);
+          if (typeof candidate.text !== "string") {
+            throw new PublicError(
+              400,
+              "INVALID_REQUEST",
+              "Paste some transcript or document text first.",
+            );
+          }
+          const document = await documentStore.createPastedText(
+            sessionId,
+            typeof candidate.name === "string"
+              ? candidate.name
+              : "Pasted transcript",
+            candidate.text,
+          );
+          sendJson(response, 201, { document });
+        } catch (error) {
+          if (error instanceof DocumentStoreError) {
+            sendError(response, asPublicError(error));
+          } else if (error instanceof PublicError) {
+            sendError(response, error);
+          } else {
+            options.logError?.("Unexpected pasted document error", error);
+            sendError(
+              response,
+              new PublicError(
+                502,
+                "DOCUMENT_ERROR",
+                "The pasted text could not be prepared.",
+              ),
+            );
+          }
+        }
+        return;
+      }
+
+      if (url.pathname === "/api/documents") {
+        if (request.method !== "POST") {
+          sendJson(
+            response,
+            405,
+            {
+              error: {
+                code: "INVALID_REQUEST",
+                message: "Upload documents with POST.",
+              },
+            },
+            { Allow: "POST" },
+          );
+          return;
+        }
+        if (!documentStore) {
           sendError(
             response,
             new PublicError(
-              502,
-              "AGENT_ERROR",
-              "The agent could not complete that request. Check the n8n workflow and try again.",
+              503,
+              "DOCUMENT_SERVICE_UNAVAILABLE",
+              "The local document reader is not configured.",
             ),
           );
+          return;
+        }
+
+        try {
+          await documentStore.cleanupExpired();
+          const upload = await readMultipartUpload(request);
+          const document = await documentStore.createFile(
+            upload.sessionId,
+            upload.fileName,
+            upload.mimeType,
+            upload.buffer,
+          );
+          sendJson(response, 201, { document });
+        } catch (error) {
+          if (error instanceof DocumentStoreError) {
+            sendError(response, asPublicError(error));
+          } else if (error instanceof PublicError) {
+            sendError(response, error);
+          } else {
+            options.logError?.("Unexpected document upload error", error);
+            sendError(
+              response,
+              new PublicError(
+                502,
+                "DOCUMENT_ERROR",
+                "The document could not be read.",
+              ),
+            );
+          }
+        }
+        return;
+      }
+
+      if (url.pathname.startsWith("/api/documents/")) {
+        if (request.method !== "DELETE") {
+          sendJson(
+            response,
+            405,
+            {
+              error: {
+                code: "INVALID_REQUEST",
+                message: "Remove documents with DELETE.",
+              },
+            },
+            { Allow: "DELETE" },
+          );
+          return;
+        }
+        if (!documentStore) {
+          sendError(
+            response,
+            new PublicError(
+              503,
+              "DOCUMENT_SERVICE_UNAVAILABLE",
+              "The local document reader is not configured.",
+            ),
+          );
+          return;
+        }
+
+        try {
+          const sessionId = validateSessionId(
+            url.searchParams.get("sessionId"),
+          );
+          const id = decodeURIComponent(
+            url.pathname.slice("/api/documents/".length),
+          );
+          await documentStore.remove(sessionId, id);
+          response.writeHead(204, {
+            ...SECURITY_HEADERS,
+            "Cache-Control": "no-store",
+          });
+          response.end();
+        } catch (error) {
+          if (error instanceof DocumentStoreError) {
+            sendError(response, asPublicError(error));
+          } else if (error instanceof PublicError) {
+            sendError(response, error);
+          } else {
+            options.logError?.("Unexpected document removal error", error);
+            sendError(
+              response,
+              new PublicError(
+                502,
+                "DOCUMENT_ERROR",
+                "The document could not be removed.",
+              ),
+            );
+          }
         }
         return;
       }
@@ -823,19 +1579,14 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
       if (url.pathname === "/api/upload") {
         if (request.method !== "POST") {
           sendJson(response, 405, {
-            error: {
-              code: "INVALID_REQUEST",
-              message: "Send files with POST.",
-            },
+            error: { code: "INVALID_REQUEST", message: "Send files with POST." },
           }, { Allow: "POST" });
           return;
         }
-
         try {
           const body = await readUploadBody(request);
           const uploadInput = validateUploadRequest(body);
-          const transcript = await buildTranscript(uploadInput);
-          sendJson(response, 200, transcript);
+          sendJson(response, 200, await buildTranscript(uploadInput));
         } catch (error) {
           if (error instanceof PublicError) {
             sendError(response, error);
@@ -844,11 +1595,7 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
           options.logError?.("Unexpected file upload error", error);
           sendError(
             response,
-            new PublicError(
-              500,
-              "EXTRACTION_FAILED",
-              "We couldn't process that file. Try again.",
-            ),
+            new PublicError(500, "EXTRACTION_FAILED", "We couldn't process that file. Try again."),
           );
         }
         return;
@@ -857,23 +1604,18 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
       if (url.pathname === "/api/ingest-url") {
         if (request.method !== "POST") {
           sendJson(response, 405, {
-            error: {
-              code: "INVALID_REQUEST",
-              message: "Send links with POST.",
-            },
+            error: { code: "INVALID_REQUEST", message: "Send links with POST." },
           }, { Allow: "POST" });
           return;
         }
-
         try {
           const body = await readRequestBody(request);
           const linkUrl = validateIngestRequest(body);
-          const ingest = await buildIngestResponse(
-            linkUrl,
-            fetchImplementation,
-            timeoutMs,
+          sendJson(
+            response,
+            200,
+            await buildIngestResponse(linkUrl, fetchImplementation, timeoutMs),
           );
-          sendJson(response, 200, ingest);
         } catch (error) {
           if (error instanceof PublicError) {
             sendError(response, error);
@@ -899,15 +1641,12 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
           }, { Allow: "GET, POST" });
           return;
         }
-
         try {
-          const meta = await callAsanaWebhook(
-            options.asanaLookupsUrl,
-            {},
-            fetchImplementation,
-            timeoutMs,
+          sendJson(
+            response,
+            200,
+            await callAsanaWebhook(options.asanaLookupsUrl, {}, fetchImplementation, timeoutMs),
           );
-          sendJson(response, 200, meta);
         } catch (error) {
           if (error instanceof PublicError) {
             sendError(response, error);
@@ -929,17 +1668,19 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
           }, { Allow: "POST" });
           return;
         }
-
         try {
           const body = await readRequestBody(request);
           const payload = validateAsanaCreateRequest(body);
-          const created = await callAsanaWebhook(
-            options.asanaCreateUrl,
-            payload,
-            fetchImplementation,
-            timeoutMs,
+          sendJson(
+            response,
+            200,
+            await callAsanaWebhook(
+              options.asanaCreateUrl,
+              payload,
+              fetchImplementation,
+              timeoutMs,
+            ),
           );
-          sendJson(response, 200, created);
         } catch (error) {
           if (error instanceof PublicError) {
             sendError(response, error);
@@ -949,6 +1690,141 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
           sendError(
             response,
             new PublicError(502, "ASANA_ERROR", "Could not create those Asana tasks."),
+          );
+        }
+        return;
+      }
+
+      if (url.pathname === "/api/chat") {
+        if (request.method !== "POST") {
+          sendJson(
+            response,
+            405,
+            {
+              error: {
+                code: "INVALID_REQUEST",
+                message: "Send chat messages with POST.",
+              },
+            },
+            { Allow: "POST" },
+          );
+          return;
+        }
+
+        let durableRequest: ChatRequest | undefined;
+        let turnStarted = false;
+        try {
+          const body = await readRequestBody(request);
+          const chatRequest = validateChatRequest(body, agents);
+          durableRequest = chatRequest;
+          const agent = activeAgentFor(chatRequest.agentId, agents);
+          const existing = chatStore.getTurn(
+            chatRequest.sessionId,
+            chatRequest.requestId,
+          );
+          if (existing.assistant) {
+            sendJson(response, 200, {
+              sessionId: chatRequest.sessionId,
+              requestId: chatRequest.requestId,
+              messageId: existing.assistant.id,
+              reply: existing.assistant.content,
+              ...(existing.assistant.runId === undefined
+                ? {}
+                : { runId: existing.assistant.runId }),
+            });
+            return;
+          }
+          if (existing.user) {
+            throw new PublicError(
+              409,
+              "REQUEST_IN_PROGRESS",
+              existing.user.status === "pending"
+                ? "That message is already being processed. Wait for its reply."
+                : "That earlier send was interrupted or failed. Send it again as a new message.",
+            );
+          }
+          if (chatRequest.documentIds.length > 0 && !documentStore) {
+            throw new PublicError(
+              503,
+              "DOCUMENT_SERVICE_UNAVAILABLE",
+              "The local document reader is not configured.",
+            );
+          }
+          const documents = documentStore
+            ? await documentStore.resolveForMessage(
+                chatRequest.sessionId,
+                chatRequest.documentIds,
+              )
+            : [];
+          chatStore.beginTurn({
+            conversationId: chatRequest.sessionId,
+            agentId: chatRequest.agentId,
+            requestId: chatRequest.requestId,
+            content: chatRequest.message,
+            attachments: documents.map(attachmentSnapshot),
+          });
+          turnStarted = true;
+          const history = chatStore.getHistory(chatRequest.sessionId);
+          const chatResponse = await callAgent(
+            chatRequest,
+            agent,
+            documents,
+            history,
+            {
+              fetchImplementation,
+              timeoutMs,
+              upstreamUrl: options.upstreamUrl,
+            },
+          );
+          const completed = chatStore.completeTurn({
+            conversationId: chatRequest.sessionId,
+            requestId: chatRequest.requestId,
+            content: chatResponse.reply,
+            ...(chatResponse.runId === undefined
+              ? {}
+              : { runId: chatResponse.runId }),
+          });
+          if (!completed.assistant) {
+            throw new Error("Stored assistant reply could not be read");
+          }
+          sendJson(response, 200, {
+            ...chatResponse,
+            requestId: chatRequest.requestId,
+            messageId: completed.assistant.id,
+          });
+        } catch (error) {
+          const publicError =
+            error instanceof DocumentStoreError
+              ? asPublicError(error)
+              : error instanceof PublicError
+                ? error
+                : undefined;
+          if (turnStarted && durableRequest) {
+            try {
+              chatStore.failTurn(
+                durableRequest.sessionId,
+                durableRequest.requestId,
+                publicError?.code ?? "AGENT_ERROR",
+              );
+            } catch (storeError) {
+              options.logError?.("Could not mark failed chat turn", storeError);
+            }
+          }
+          if (error instanceof DocumentStoreError) {
+            sendError(response, publicError as PublicError);
+            return;
+          } else if (error instanceof PublicError) {
+            sendError(response, error);
+            return;
+          }
+          options.logError?.("Unexpected chat gateway error", error);
+          sendError(
+            response,
+            new PublicError(
+              502,
+              "AGENT_ERROR",
+              "The agent could not complete that request. Check the n8n workflow and try again.",
+            ),
           );
         }
         return;
@@ -988,5 +1864,11 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
 }
 
 export function createChatServer(options: ChatGatewayOptions): Server {
-  return createServer(createChatHandler(options));
+  const ownsChatStore = options.chatStore === undefined;
+  const chatStore = options.chatStore ?? new ChatStore(":memory:");
+  const server = createServer(createChatHandler({ ...options, chatStore }));
+  if (ownsChatStore) {
+    server.once("close", () => chatStore.close());
+  }
+  return server;
 }

@@ -1,8 +1,8 @@
 # AI Solopreneur
 
-Build and personalise a useful Claude-powered project assistant on your own computer—without installing Node.js, npm, or n8n.
+Build and personalise a useful Claude-powered project assistant on your own computer. No manual Node.js install is required: Claude Code or the one-click setup selects the reviewed Node.js 24.18.0 and npm 11.16.0 pair, downloading a verified private copy inside this project when that exact pair is not already available.
 
-**Local release:** `v0.1.0`
+**Local release:** `v0.2.0`
 
 If this is your first technical project, use the
 **[complete beginner getting-started guide](docs/GETTING_STARTED.md)**. It
@@ -14,23 +14,30 @@ In about 30 minutes you will have:
 - Your own browser chat.
 - A visual n8n agent you can inspect.
 - Claude connected through a private n8n credential.
+- PDF, DOCX, TXT, and long-transcript input.
 - Local project tasks and conversation memory.
 - Editable Markdown skills.
 - Confirmation-gated task creation and status changes.
 
-Everything runs locally with Docker Desktop. Nothing is deployed to the cloud in this release.
+Everything runs locally as ordinary Node.js processes. Nothing is deployed to the cloud in this release.
 
 ![The finished local chat rejecting plain yes and accepting an exact confirmation](docs/images/03-chat-confirmation.png)
 
 ## Start here
 
-### 1. Prepare the three things you need
+### 1. Prepare the things you need
 
 - A GitHub account.
-- Docker Desktop installed, open, and showing that its engine is running.
+- Claude Desktop, open in Code mode.
+- GitHub Desktop if you want its visual commit-and-push workflow.
 - An Anthropic Console API key with a small amount of API credit.
+- At least 6 GB of free disk space for first setup; 8 GB is recommended.
 
 Use the detailed [workshop prerequisites](docs/WORKSHOP_PREREQUISITES.md) if any item is unfamiliar. A Claude web subscription does not include API usage.
+
+Windows support is Windows 10 or 11 on x64, plus Windows 11 on ARM through its
+built-in x64 emulation. Windows 10 on ARM is not supported. On Windows, keep the
+project in a short local folder outside OneDrive and network/UNC paths.
 
 Never paste the Claude API key into GitHub, `.env`, a chat message, a screenshot, or `agent.config.js`. You will enter it only in n8n.
 
@@ -40,14 +47,32 @@ Never paste the Claude API key into GitHub, `.env`, a chat message, a screenshot
 2. Choose your account, give the project a name, and select private visibility for workshop work.
 3. Leave **Include all branches** off.
 4. Select **Create repository**.
-5. In GitHub Desktop, choose **File → Clone repository**, select the repository you just created, and choose **Clone**.
-6. Select **Show in Finder** on macOS or **Show in Explorer** on Windows.
+5. Select **Code**, keep **HTTPS** selected, and copy your repository URL.
+6. Open Claude Desktop in Code mode and ask: `Please clone this repo: <paste your repository URL>`. On Windows, add: `Use a short local folder outside OneDrive or a network path.`
+7. Open the cloned project in the Claude Code session.
 
-The [GitHub Desktop guide](docs/GITHUB_DESKTOP.md) includes the complete click-by-click workflow and explains how to save your customisations.
+The [GitHub Desktop guide](docs/GITHUB_DESKTOP.md) remains available as a visual cloning fallback and explains how to review, commit, and push your customisations.
 
 ### 3. Run the one-click setup
 
-Make sure Docker Desktop says it is ready, then open the cloned folder.
+In the cloned project's Claude Code session, ask:
+
+```text
+Read the README and the existing setup scripts in this repository.
+Start the local services using the project's documented one-click setup.
+On Windows, set AI_SOLO_NO_PAUSE=1 before running the .cmd helper.
+Keep them running, verify the chat and n8n URLs, then open those two pages for me.
+```
+
+Claude runs the matching helper. Setup accepts an existing Node.js 24.18.0 only
+when it has the matching npm 11.16.0; otherwise it downloads the official
+Node.js archive, verifies its SHA-256 checksum, and keeps the reviewed pair in
+the Git-ignored `.runtime/` folder. It does not install anything globally or
+request administrator access. `AI_SOLO_NO_PAUSE=1` lets the Windows launcher
+return its real status to Claude Code without waiting for a key; double-clicked
+launchers still pause so a learner can read the result.
+
+You can also run the same setup without Claude:
 
 #### macOS
 
@@ -59,7 +84,12 @@ If macOS blocks it, Control-click the file, choose **Open**, then confirm.
 
 Double-click `setup-windows.cmd`.
 
-Setup generates a private local encryption key, downloads the pinned images, builds the chat, starts both services, imports all reviewed workflows, creates three sample tasks, and loads the enabled skills. First setup can take several minutes.
+Setup prepares the reviewed Node.js 24.18.0 and npm 11.16.0 pair when needed,
+checks disk space, folder access, and all required local ports, downloads the exact
+pinned n8n release and document-reader packages, builds the chat app, starts all
+three services in the background, imports all reviewed workflows, creates three
+sample tasks, and loads the enabled skills. First setup can take several minutes
+while packages download.
 
 Success ends with:
 
@@ -79,7 +109,7 @@ The fallback is safe to repeat and does not duplicate the sample tasks.
 
 ### 4. Create the local n8n owner
 
-Open [http://localhost:5678](http://localhost:5678). On the first visit, create the owner account. Use a private password; this account exists only inside the local Docker volume.
+Open [http://localhost:5678](http://localhost:5678). On the first visit, create the owner account. Use a private password; this account exists only inside this project's Git-ignored `data/` folder on this computer.
 
 ![The local n8n owner-account screen](docs/images/01-n8n-owner-setup.png)
 
@@ -97,7 +127,7 @@ When the n8n Overview appears, open `01 - START HERE - Learner Checklist`. Its f
 6. Select **Publish**.
 7. Open `90 - DEBUG - Agent Health` and select **Publish**.
 
-The key stays in n8n's encrypted credential store. The browser and chat container never receive it.
+The key stays in n8n's encrypted credential store. The browser and chat gateway never receive it.
 
 ### 6. Check readiness
 
@@ -106,7 +136,7 @@ Run the friendly diagnostic:
 - macOS: double-click `diagnose.command`.
 - Windows: double-click `diagnose-windows.cmd`.
 
-The helper checks Docker, both local services, the installed checklist, the published agent, the selected Anthropic credential, and the health workflow. It does not call Claude and never displays credential values.
+The helper checks Node.js, all three local services, the installed checklist, the published agent, the selected Anthropic credential, and the health workflow. It does not call Claude and never displays credential values.
 
 Follow any yellow `[next]` line, then run it again. Continue when it reports:
 
@@ -126,6 +156,24 @@ For the third message, check the proposed fields and send the exact `CONFIRM XXX
 
 You now have a working local AI agent.
 
+### 8. Try a meeting transcript or document
+
+1. Select the **+** inside the message box, then choose **Upload a file** and
+   select a PDF, DOCX, or TXT file, or choose **Paste long text** and add a
+   transcript.
+2. Wait until the document appears as a removable chip inside the message box.
+3. Enter an instruction such as
+   `Summarise this meeting, separate decisions from ideas, and list action items with owners and due dates.`
+4. Select **Send**.
+
+The chip leaves the message box when sent and appears above your message in the
+conversation, so it is always clear which file the agent received.
+
+The document is read locally. Its extracted text is sent to Claude with your
+instruction, so do not add secrets you would not send to the Anthropic API.
+Scanned image-only PDFs need OCR and are not supported yet. See
+[Use documents and long transcripts](docs/DOCUMENT_UPLOADS.md).
+
 ## Make it yours
 
 Start with two beginner-safe changes:
@@ -144,9 +192,12 @@ Before a workshop experiment or workflow edit, create a private backup:
 - macOS: double-click `backup.command`.
 - Windows: double-click `backup-windows.cmd`.
 
-Backups contain encrypted credentials and the matching encryption key. They are ignored by Git and must stay private.
+Backups contain plaintext saved chats, encrypted credentials, and local settings.
+They are ignored by Git and must stay private.
 
-Normal stop/start keeps data. Reset permanently removes local n8n accounts, credentials, workflows, and history:
+Normal stop/start restores saved chats and recent per-conversation context.
+Reset permanently removes saved chats, local n8n accounts, credentials,
+workflows, execution history, and extracted document context:
 
 - macOS: double-click `reset.command`.
 - Windows: double-click `reset-windows.cmd`.
@@ -155,17 +206,25 @@ Reset asks you to type `RESET`. The [operations and recovery guide](docs/LOCAL_O
 
 ## What is included
 
-- Docker Compose with pinned n8n and chat images.
-- A dependency-free TypeScript chat gateway and custom browser interface.
+- One cross-platform Node.js runner (`scripts/local.mjs`) behind every double-click helper.
+- A checksum-verified Node.js 24.18.0 and npm 11.16.0 bootstrap for macOS and Windows, stored only inside `.runtime/` when the computer needs it.
+- The exact pinned n8n release, installed with npm and kept in this project's folder.
+- A TypeScript chat gateway, custom browser interface, and isolated document reader.
 - Eleven reviewed n8n workflows, including the visual learner checklist.
-- Claude Sonnet integration with per-conversation local memory.
+- Durable local SQLite chat history with browsing, full-text search, rename,
+  deletion, and restart-safe bounded conversation memory.
 - Four local Data Tables for tasks, audits, pending confirmations, and enabled skills.
-- Three editable Markdown skills.
+- Four editable Markdown skills, including grounded meeting analysis.
+- A central agent registry with Project Manager active and Sales, Marketing,
+  Investment, and Bookkeeping shown as coming soon.
+- Local extraction for searchable PDFs, DOCX, TXT, and pasted text.
 - Automatic reads and exact, expiring, single-use confirmation for writes.
 - Local diagnostics, backup, restore, reset, import, export, and skill-sync helpers.
 - macOS and Windows entry points.
 
-Deliberately deferred: cloud deployment, public access, Slack, WhatsApp, Telegram, email, external project-management accounts, multi-user authentication, RAG, queues, and autonomous background work.
+Deliberately deferred: OCR for scanned PDFs, cloud deployment, public access,
+Slack, WhatsApp, Telegram, email, external project-management accounts,
+multi-user authentication, RAG, queues, and autonomous background work.
 
 ## Guides
 
@@ -178,6 +237,8 @@ Deliberately deferred: cloud deployment, public access, Slack, WhatsApp, Telegra
 - [Connect the visual agent to Claude](docs/N8N_AGENT_SETUP.md)
 - [Customise the chat](docs/CUSTOMISE_CHAT.md)
 - [Customise Markdown skills](docs/CUSTOMISE_SKILLS.md)
+- [Use documents and long transcripts](docs/DOCUMENT_UPLOADS.md)
+- [Understand durable local chat memory](docs/CHAT_PERSISTENCE_PLAN.md)
 - [Troubleshooting quick table](docs/TROUBLESHOOTING.md)
 
 ### Instructors
@@ -198,35 +259,32 @@ Deliberately deferred: cloud deployment, public access, Slack, WhatsApp, Telegra
 
 - [Product baseline](docs/PRODUCT_BASELINE.md)
 - [Chat API contract](docs/CHAT_CONTRACT.md)
+- [Add another agent or workflow](docs/ADD_AN_AGENT.md)
 - [Local task tools](docs/LOCAL_TASK_TOOLS.md)
 - [Safe write confirmation](docs/SAFE_WRITE_CONFIRMATION.md)
 - [n8n workflow exports](n8n/README.md)
 - [Move visual workflow changes back into Git](docs/WORKFLOW_DEVELOPMENT.md)
 - [Phased implementation plan](docs/IMPLEMENTATION_PLAN.md)
 
-Technical checks use the pinned Docker images; learners do not need development runtimes on the host:
+Technical checks run directly with the same reviewed Node.js and npm pair used
+by the learner helpers:
 
 ```bash
-docker run --rm \
-  -v "$PWD:/workspace:ro" \
-  -w /workspace \
-  node:24.16.0-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a \
-  node scripts/validate-workflows.mjs
-
-./scripts/test-phase6.sh
-./scripts/test-phase7.sh
-./scripts/test-phase8.sh
+node scripts/validate-workflows.mjs
 
 # The evaluator remains NO_GO because the owner waived, rather than fabricated,
 # the planned human pilot.
 ./scripts/evaluate-pilot.sh
 ```
 
+The maintenance helpers are also available directly: `node scripts/local.mjs help` lists setup, start, stop, status, logs, diagnose, and the import, export, backup, restore, and reset commands. The repository does not currently include an automated test or CI/CD suite; contributors should validate workflow structure and manually exercise the affected learner path before sharing a change.
+
 ## Current milestone
 
 Phases 0–8 of the local-first implementation plan are implemented for local
-release `v0.1.0`. The repository owner reviewed the experience and explicitly
-authorised Phase 8 without the planned five-person pilot. That waiver is
-recorded transparently: `pilot/results.json` remains `not_run` and the evaluator
-remains `NO_GO`. Cloud deployment, external chat channels, and production
-hardening remain deferred.
+release `v0.2.0`, using a verified project-local Node.js runtime throughout.
+The repository owner reviewed the experience and
+explicitly authorised Phase 8 without the planned five-person pilot. That
+waiver is recorded transparently: `pilot/results.json` remains `not_run` and
+the evaluator remains `NO_GO`. Cloud deployment, external chat channels, and
+production hardening remain deferred.
