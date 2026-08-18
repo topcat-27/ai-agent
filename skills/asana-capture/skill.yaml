@@ -1,4 +1,5 @@
 id: asana-capture
+agent: project-manager
 name: Asana Capture
 version: 1.0.0
 description: Turn meeting actions into an editable Asana proposal the user reviews before pushing.
