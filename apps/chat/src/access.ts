@@ -249,13 +249,17 @@ function loginPage(state: PageState): string {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex, nofollow" />
-    <title>Your agent</title>
+    <title>Pitchy</title>
     <link rel="stylesheet" href="/access.css" />
   </head>
   <body>
     <main>
-      <h1>Your agent</h1>
-      <p class="lead">This agent is yours. Enter your passcode to open it.</p>${banner}
+      <svg class="mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 100" role="img" aria-label="PitchUp">
+        <path d="M62 5 C 90 5, 113 19, 116 44 C 119 69, 95 95, 61 95 C 33 95, 11 81, 5 57 C -1 32, 28 5, 62 5 Z" fill="#3c4358" stroke="#f5b46a" stroke-width="5" stroke-linejoin="round" />
+        <text x="60" y="52" text-anchor="middle" dominant-baseline="central" fill="#ffffff" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="62" font-weight="700">P</text>
+      </svg>
+      <h1>Pitchy</h1>
+      <p class="lead">Your PitchUp agent. Enter your passcode to open it.</p>${banner}
       <form method="post" action="/access">
         <label for="passcode">Passcode</label>
         <input
@@ -285,7 +289,7 @@ const LOGIN_STYLESHEET = `:root {
   --line: #d8dbe2;
   --paper: #ffffff;
   --page: #f4f5f7;
-  --accent: #1f5eff;
+  --accent: #1D3463;
   --warn: #8a2b12;
   --warn-bg: #fdece7;
 }
@@ -296,12 +300,13 @@ const LOGIN_STYLESHEET = `:root {
     --line: #343841;
     --paper: #1c1f26;
     --page: #121419;
-    --accent: #7ba1ff;
+    --accent: #3E63A8;
     --warn: #ffb4a0;
     --warn-bg: #3a1d16;
   }
 }
 * { box-sizing: border-box; }
+.mark { width: 56px; height: 47px; display: block; margin: 0 0 1.1rem; }
 body {
   margin: 0;
   min-height: 100vh;
