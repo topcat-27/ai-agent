@@ -10,7 +10,6 @@ At the end of this guide:
 - The browser chat will send messages through n8n to Claude.
 - Each browser conversation will have separate, restart-safe local memory.
 - Local tables will contain three starter tasks and the enabled skill bundle.
-- An authorised public-domain scan can save company, competitor, and keyword research to local SQLite memory.
 - Creating or updating a task will require an exact, expiring confirmation.
 - A second, credential-free workflow will provide a safe local health check.
 
@@ -30,9 +29,15 @@ Anthropic API access is billed separately from a Claude web-chat subscription. T
 
 ## 1. Confirm the automatic workflow import
 
-The repository includes fourteen reviewed workflow exports. First setup imports them automatically, so learners do not need to build nodes from a blank canvas.
+The repository includes eleven reviewed base workflow exports. First setup
+imports those plus any optional workflows already installed in this copy, so
+learners do not need to build nodes from a blank canvas.
 
-Refresh the n8n Overview. If `01 - START HERE - Learner Checklist` appears, continue to step 2.
+Open **Personal** in the n8n sidebar. This is the page to work from.
+
+If this n8n has a folder licence, import also files every workflow into a folder named after a skill, so the list reads as the handful of things the agent can do rather than a wall of workflows. Without one the workflows sit in a single flat list, which changes nothing about how the agent works. The **Overview** page is always flat and never shows folders.
+
+If `01 - START HERE - Learner Checklist` appears, in a `1. Start here` folder or on its own, continue to step 2.
 
 If the workflows are missing or automatic import was interrupted, use the repeatable manual fallback:
 
@@ -46,26 +51,24 @@ If macOS blocks it, Control-click the file, choose **Open**, then confirm.
 
 Double-click `import-workflows-windows.cmd`.
 
-The fallback opens a terminal, checks the workflows and Markdown skills, starts n8n if needed, and imports all fourteen workflows. It briefly enables localhost-only setup endpoints to create local tables and sync enabled skills, then immediately removes both endpoints. It publishes the reviewed runtime subworkflows but does not publish the main agent, health workflow, or an API key.
+The fallback opens a terminal, checks the workflows and Markdown skills, starts
+n8n if needed, and imports every workflow present in `n8n/workflows`. It briefly
+enables localhost-only setup endpoints to create local tables and sync enabled
+skills, then immediately removes both endpoints. It publishes the reviewed
+runtime subworkflows but does not publish the main agent, health workflow, or
+an API key.
 
-Refresh the n8n Overview. All fourteen workflows should appear:
+Refresh **Personal**. All eleven base workflows and every installed optional
+workflow should appear. With a folder licence the base workflows are grouped
+into three folders:
 
-- `00 - START HERE - Project Partner`
-- `01 - START HERE - Learner Checklist`
-- `10 - SETUP - Local Task Data`
-- `11 - SETUP - Sync Enabled Skills`
-- `20 - TOOL - list_tasks`
-- `21 - TOOL - create_task`
-- `22 - TOOL - update_task_status`
-- `30 - TOOL - Propose create_task`
-- `31 - TOOL - Propose update_task_status`
-- `40 - CONFIRM - Task Write`
-- `50 - TOOL - start_domain_research`
-- `51 - TOOL - complete_domain_research`
-- `52 - TOOL - get_business_memory`
-- `90 - DEBUG - Agent Health`
+- `1. Start here` — `00 - START HERE - Project Partner`, `01 - START HERE - Learner Checklist`
+- `2. Tasks` — `20 - TOOL - list_tasks`, `21 - TOOL - create_task`, `22 - TOOL - update_task_status`, `30 - TOOL - Propose create_task`, `31 - TOOL - Propose update_task_status`, `40 - CONFIRM - Task Write`
+- `5. Setup and health` — `10 - SETUP - Local Task Data`, `11 - SETUP - Sync Enabled Skills`, `90 - DEBUG - Agent Health`
 
-The nine runtime dependencies—task read tool, two proposal tools, confirmation dispatcher, two task write workers, and three domain-research tools—are published automatically. The task write workers are callable only by workflow `40`; no AI Tool node points to them. The main agent, health workflow, and two temporary setup workflows remain inactive drafts. The learner checklist is an inactive visual guide that can be opened or run manually.
+If the workflows are there but sitting loose instead of in folders, this n8n has no folder licence — that is expected, and nothing about the agent depends on it. After registering the free community edition inside n8n, run `node scripts/local.mjs group-workflows` and refresh.
+
+The reviewed runtime dependencies are published automatically. The task write workers are callable only by workflow `40`; no AI Tool node points to them. The main agent, health workflow, and temporary setup workflows remain inactive drafts. The learner checklist is an inactive visual guide that can be opened or run manually.
 
 Open **Data tables** in n8n:
 
@@ -101,15 +104,9 @@ Never put this key in `.env`, `agent.config.js`, a workflow sticky note, a scree
 
 The key is encrypted using the private n8n encryption key generated during local setup. The browser chat and chat gateway never receive it.
 
-If domain research is enabled, the same Anthropic credential does the analysis. No second service and no second key are needed:
-
-1. Open `50 - TOOL - start_domain_research`.
-2. Select the **Analyse With Claude** node.
-3. Choose the `Anthropic account` credential and save.
-
-Domain research reads three destinations and nothing else: the researched domain's own public home page, the Anthropic API, and the local chat gateway at `http://127.0.0.1:3000`. If you intentionally changed the chat port, update those reviewed node URLs before publishing.
-
-Research finishes inside `start_domain_research`, which reads one public page, analyses it, and saves the result to local memory in a single call. Competitors that the page does not name are recorded as model inferences, and thin evidence is saved as `partial` with its warnings rather than padded out.
+Installed optional skills add their own workflows and setup instructions. Follow
+the README inside that optional skill; never paste provider credentials into a
+file or chat.
 
 ## 4. Inspect and publish the agent
 
@@ -122,15 +119,13 @@ Open `00 - START HERE - Project Partner`. The sticky notes describe the read, pr
 | **Request Is Valid?** | Ensures only the valid branch can reach the agent |
 | **Route Confirmation** | Recognises only a complete `CONFIRM XXXXXXXX` message |
 | **Load Enabled Skills** | Reads the bundle compiled from `skills/enabled.txt` |
-| **Build Agent Context** | Separates saved history, the current instruction, documents, and enabled skills |
-| **Project Partner Agent** | Runs the Project Manager instructions and controls the number of model steps |
+| **Build Agent Context** | Selects only the requested role's policy, skills, settings, saved history, current instruction, and documents |
+| **Route Selected Agent** | Sends the request to exactly one of five role-specific AI Agent nodes |
+| **Five role agents** | Keep Project Manager, Sales, Marketing, Investment, and Bookkeeping tool connections structurally separate |
 | **Claude - Sonnet 4.6** | Calls Claude using the n8n credential |
 | **list_tasks** | Retrieves task facts through the reviewed read-only subworkflow |
 | **create_task** | Validates and stores a five-minute create proposal without changing tasks |
 | **update_task_status** | Validates and stores a five-minute status proposal without changing tasks |
-| **start_domain_research** | Starts one explicitly authorised public-domain research job and binds it to this conversation |
-| **complete_domain_research** | Checks that bound job and saves only completed or partial results to local SQLite memory |
-| **get_business_memory** | Reads saved company, competitor, keyword, source, and warning facts |
 | **Confirm Stored Action** | Calls the deterministic confirmation workflow before either write worker |
 | **Return Agent Reply** | Returns only `sessionId`, `reply`, and `runId` |
 | **Return Invalid Request** | Returns a safe 400 or 413 response without calling Claude |
@@ -173,8 +168,8 @@ This proves that n8n can run a published workflow. It deliberately does not call
 Double-click `diagnose.command` on macOS or `diagnose-windows.cmd` on Windows.
 
 The helper checks the local services, the installed learner checklist, main
-workflow publication, the selected Anthropic credential, the credential-free
-validation path, and the health workflow. It never calls Claude or displays
+workflow publication, the selected Anthropic credential, optional-skill credential selections, the credential-free
+validation path, and the health workflow. It calls no paid provider and displays no
 credential values.
 
 Resolve each yellow `[next]` line. Continue when it reports **All checks are green**.
@@ -204,7 +199,8 @@ flowchart LR
     Gateway --> Validate["n8n validation"]
     Validate --> Route{"Exact confirmation?"}
     Route -- No --> Skills["Enabled skills"]
-    Skills --> Agent["Project Partner Agent"]
+    Skills --> Switch{"Selected role"}
+    Switch --> Agent["One role-specific agent"]
     Model["Claude Sonnet 4.6"] -. model .-> Agent
     Validate -. saved conversation context .-> Agent
     Tasks["Read-only list_tasks tool"] -. local facts .-> Agent

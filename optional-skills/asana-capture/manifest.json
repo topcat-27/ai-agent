@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "asana-capture",
+  "agent": "project-manager",
+  "name": "Asana Capture",
+  "requires": [],
+  "agentTools": [],
+  "policyEntries": [],
+  "policyRules": [],
+  "unavailableCapabilities": [],
+  "policyReplacements": [],
+  "folders": [
+    {
+      "id": "skill-asana",
+      "name": "4. Asana",
+      "description": "Your own Asana integration: look up projects and people, then create tasks from a reviewed meeting.",
+      "workflows": [
+        "50-asana-lookups.json",
+        "51-asana-create-tasks.json"
+      ]
+    }
+  ]
+}

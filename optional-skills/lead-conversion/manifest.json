@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "lead-conversion",
+  "agent": "global",
+  "name": "Lead Conversion",
+  "requires": [],
+  "agentTools": [],
+  "policyEntries": [],
+  "policyRules": [],
+  "unavailableCapabilities": [],
+  "policyReplacements": [],
+  "folders": []
+}

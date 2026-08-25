@@ -16,6 +16,7 @@ const DEFAULT_PORT = 3_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_UPSTREAM_URL = "http://127.0.0.1:5678/webhook/chat";
 const DEFAULT_DOCUMENT_WORKER_URL = "http://127.0.0.1:3100";
+const DEFAULT_N8N_PUBLIC_URL = "http://localhost:5678";
 
 function positiveInteger(value: string | undefined, fallback: number): number {
   if (value === undefined) {
@@ -31,6 +32,19 @@ const timeoutMs = positiveInteger(
   DEFAULT_TIMEOUT_MS,
 );
 const upstreamUrl = process.env.N8N_CHAT_WEBHOOK_URL ?? DEFAULT_UPSTREAM_URL;
+// The gateway reaches n8n over loopback, but the learner's browser cannot use
+// that address on a hosted kit, so the address they get sent to is separate.
+const n8nPublicUrl = process.env.N8N_PUBLIC_URL ?? DEFAULT_N8N_PUBLIC_URL;
+
+/** Asana webhooks sit beside the chat webhook on the same n8n instance. */
+function siblingWebhook(path: string): string {
+  return new URL(path, `${upstreamUrl.replace(/\/[^/]*$/, "")}/`).toString();
+}
+
+const asanaLookupsUrl =
+  process.env.N8N_ASANA_LOOKUPS_URL ?? siblingWebhook("asana-lookups");
+const asanaCreateUrl =
+  process.env.N8N_ASANA_CREATE_URL ?? siblingWebhook("asana-create");
 const listenAddress = process.env.CHAT_LISTEN_ADDRESS ?? "127.0.0.1";
 const publicDirectory = fileURLToPath(new URL("../public", import.meta.url));
 const agentRegistryPath =
@@ -50,6 +64,9 @@ const profileDataDirectory =
 const skillsDirectory =
   process.env.SKILLS_DIRECTORY ??
   fileURLToPath(new URL("../../../skills", import.meta.url));
+const skillPacksDirectory =
+  process.env.SKILL_PACKS_DIRECTORY ??
+  fileURLToPath(new URL("../../../skill-packs", import.meta.url));
 
 try {
   new URL(upstreamUrl);
@@ -58,15 +75,12 @@ try {
   process.exit(1);
 }
 
-/** Asana webhooks sit beside the chat webhook on the same n8n instance. */
-function siblingWebhook(path: string): string {
-  return new URL(path, `${upstreamUrl.replace(/\/[^/]*$/, "")}/`).toString();
+try {
+  new URL(n8nPublicUrl);
+} catch {
+  console.error("N8N_PUBLIC_URL must be a valid URL.");
+  process.exit(1);
 }
-
-const asanaLookupsUrl =
-  process.env.N8N_ASANA_LOOKUPS_URL ?? siblingWebhook("asana-lookups");
-const asanaCreateUrl =
-  process.env.N8N_ASANA_CREATE_URL ?? siblingWebhook("asana-create");
 
 // The gate exists only when a passcode is configured. On a learner's own
 // computer nothing sets one, so the local experience is unchanged; the cloud
@@ -116,9 +130,11 @@ const server = createChatServer({
   profileStore,
   agentSettingsStore,
   skillsDirectory,
+  skillPacksDirectory,
   profileDirectory: profileDataDirectory,
   publicDirectory,
   upstreamUrl,
+  n8nPublicUrl,
   asanaLookupsUrl,
   asanaCreateUrl,
   timeoutMs,

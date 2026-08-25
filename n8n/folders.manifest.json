@@ -11,7 +11,12 @@
     "Folder IDs are fixed so re-running setup updates the same folders instead",
     "of creating duplicates. Order controls both the number in the name and the",
     "timestamps, so the list reads top to bottom under either n8n sort option.",
-    "Names are what a learner reads. Say the skill out loud; no node names, no IDs."
+    "Names are what a learner reads. Say the skill out loud; no node names, no IDs.",
+    "Workflow numbering: the 50-69 tool band and 70-79 trigger band are full, and",
+    "the scheduler skill has spilled into 76-80. From 100 upward the convention is",
+    "one contiguous ten-number block per skill, so a skill's files read together in",
+    "a directory listing. 100-109 is the Xero coding review; 90 stays the debug",
+    "workflow; the skill after that takes 110-119."
   ],
   "folders": [
     {
@@ -37,14 +42,32 @@
       ]
     },
     {
+      "id": "skill-your-business",
+      "name": "3. Your business",
+      "description": "Researching a website you own and recalling what the agent already learned about the business.",
+      "workflows": [
+        "50-tool-start-domain-research.json",
+        "51-tool-complete-domain-research.json",
+        "52-tool-get-business-memory.json"
+      ]
+    },
+    {
+      "id": "skill-asana",
+      "name": "4. Asana",
+      "description": "Your own Asana integration: look up projects and people, then create tasks from a reviewed meeting.",
+      "workflows": [
+        "50-asana-lookups.json",
+        "51-asana-create-tasks.json"
+      ]
+    },
+    {
       "id": "skill-setup-and-health",
       "name": "5. Setup and health",
       "description": "Run-once plumbing and the health check. A learner rarely opens these, but they should be able to find them.",
       "workflows": [
         "10-setup-local-task-data.json",
         "11-setup-sync-enabled-skills.json",
-        "90-debug-agent-health.json",
-        "14-setup-funding-data.json"
+        "90-debug-agent-health.json"
       ]
     },
     {
@@ -53,18 +76,6 @@
       "description": "Entry points that let something outside your computer start your agent: a Telegram message today, an inbox or a schedule later.",
       "workflows": [
         "70-trigger-telegram-message.json"
-      ]
-    },
-    {
-      "id": "skill-free-money",
-      "name": "6. Money you can apply for",
-      "description": "Grants, rebates, tax incentives, and credit programs your business could apply for: going and looking for them, reading back what was found, and saving the business facts that decide what you are eligible for.",
-      "workflows": [
-        "63-tool-get-funding-report.json",
-        "64-tool-set-funding-profile.json",
-        "68-tool-start-funding-scan.json",
-        "71-run-funding-scan.json",
-        "72-run-funding-beat.json"
       ]
     }
   ]

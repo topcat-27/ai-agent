@@ -19,7 +19,81 @@ export interface ArticleQualityReport {
     bulletLineRatio: number;
     primaryKeywordUses: number;
     unsupportedClaims: number;
+    topicTitleCoverage: number;
+    topicIntroductionCoverage: number;
   };
+}
+
+/**
+ * Normalise presentation-only differences without changing words, numbers,
+ * punctuation, or negation. Claim ledgers describe visible prose, so Markdown
+ * links and emphasis must not make an otherwise exact sentence disappear.
+ */
+export function normalizeArticleEvidenceText(value: unknown): string {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .replace(/!\[([^\]]*)\]\([^\n)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^\n)]*\)/g, "$1")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/^\s{0,3}(?:#{1,6}|>)\s*/gm, "")
+    .replace(/^\s*[-+]\s+/gm, "")
+    .replace(/[`*_~]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+export function articleTextContainsClaim(haystack: unknown, needle: unknown): boolean {
+  const normalNeedle = normalizeArticleEvidenceText(needle);
+  return normalNeedle.length > 0 &&
+    normalizeArticleEvidenceText(haystack).includes(normalNeedle);
+}
+
+/**
+ * Source excerpts are evidence, not presentation text. Only Unicode case and
+ * whitespace differences are ignored here; Markdown, HTML, punctuation,
+ * numbers, and URLs must remain exact so invented markup cannot be smuggled
+ * into a stored excerpt.
+ */
+export function normalizeArticleExcerptText(value: unknown): string {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Extracted HTML can insert whitespace inside a word at an inline-tag
+ * boundary. The compact comparison ignores whitespace only; letters,
+ * punctuation, numbers, and order must still match.
+ */
+export function articleTextContainsExcerpt(haystack: unknown, needle: unknown): boolean {
+  const normalNeedle = normalizeArticleExcerptText(needle);
+  if (normalNeedle.length > 0 && normalizeArticleExcerptText(haystack).includes(normalNeedle)) {
+    return true;
+  }
+  const compact = (value: unknown) => normalizeArticleExcerptText(value).replace(/\s+/g, "");
+  const compactNeedle = compact(needle);
+  return compactNeedle.length > 0 && compact(haystack).includes(compactNeedle);
+}
+
+const TOPIC_STOP_WORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does",
+  "for", "from", "guide", "how", "in", "is", "it", "of", "on", "or", "simple",
+  "terms", "the", "to", "what", "when", "where", "which", "who", "why", "with",
+]);
+
+function topicTokens(value: string): Set<string> {
+  return new Set(
+    plainWords(value).filter((word) => word.length > 1 && !TOPIC_STOP_WORDS.has(word)),
+  );
+}
+
+function topicCoverage(topic: Set<string>, value: string): number {
+  if (topic.size === 0) return 1;
+  const actual = topicTokens(value);
+  return [...topic].filter((token) => actual.has(token)).length / topic.size;
 }
 
 function plainWords(markdown: string): string[] {
@@ -42,6 +116,7 @@ function repeatedOpenings(markdown: string): boolean {
 export function evaluateArticleQuality(input: {
   markdown: string;
   primaryKeyword: string;
+  requestedTopic?: string;
   seoTitle: string;
   metaDescription: string;
   slug: string;
@@ -61,8 +136,24 @@ export function evaluateArticleQuality(input: {
     ? input.markdown.toLowerCase().split(keyword).length - 1
     : 0;
   const unsupportedClaims = input.claims.filter((claim) => claim.support === "unsupported").length;
+  const requestedTopic = input.requestedTopic?.trim() || input.primaryKeyword;
+  const requestedTokens = topicTokens(requestedTopic);
+  const h1 = lines.find((line) => /^#\s+\S/.test(line)) ?? "";
+  const introduction = input.markdown
+    .replace(/^#\s+.*$/m, "")
+    .split(/\n\s*\n/)
+    .map((paragraph) => paragraph.trim())
+    .find((paragraph) => paragraph && !paragraph.startsWith("#")) ?? "";
+  const topicTitleCoverage = topicCoverage(requestedTokens, `${h1} ${input.seoTitle}`);
+  const topicIntroductionCoverage = topicCoverage(requestedTokens, introduction);
 
   if (!/^#\s+\S/m.test(input.markdown)) errors.push("The article needs one clear H1 heading.");
+  if (topicTitleCoverage < 0.6) {
+    errors.push("The H1 and SEO title do not preserve the requested topic.");
+  }
+  if (topicIntroductionCoverage < 0.6) {
+    errors.push("The introduction does not directly address the requested topic.");
+  }
   if (input.seoTitle.length < 20 || input.seoTitle.length > 65) {
     errors.push("The SEO title must be 20–65 characters.");
   }
@@ -97,12 +188,23 @@ export function evaluateArticleQuality(input: {
     );
   if (
     riskyFactSentences.some(
-      (sentence) => !input.claims.some((claim) => sentence.includes(claim.sentence)),
+      (sentence) => !input.claims.some((claim) => articleTextContainsClaim(sentence, claim.sentence)),
     )
   ) {
     errors.push("A statistic, date, or attributed claim is missing from the claim ledger.");
   }
   if (unsupportedClaims > 0) errors.push("Unsupported factual claims remain in the article.");
+  if (
+    /\b(?:near me|nearby)\b/i.test(`${input.seoTitle} ${input.metaDescription} ${input.slug}`) &&
+    !/\b(?:near me|nearby)\b/i.test(requestedTopic)
+  ) {
+    errors.push("The article adds local search intent that the requested topic did not ask for.");
+  }
+  if (
+    /\b(?:guaranteed? rankings?|rank number one|#1 on google|guaranteed? traffic)\b/i.test(input.markdown)
+  ) {
+    errors.push("The draft makes an unsupported traffic or ranking promise.");
+  }
   if (input.faqCount !== input.faqJsonLdCount) {
     errors.push("FAQ structured data must match the visible FAQ exactly.");
   }
@@ -119,6 +221,8 @@ export function evaluateArticleQuality(input: {
       bulletLineRatio: Number(bulletLineRatio.toFixed(3)),
       primaryKeywordUses,
       unsupportedClaims,
+      topicTitleCoverage: Number(topicTitleCoverage.toFixed(3)),
+      topicIntroductionCoverage: Number(topicIntroductionCoverage.toFixed(3)),
     },
   };
 }

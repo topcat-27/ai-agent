@@ -81,8 +81,21 @@ export function learnerPublishedIds(databasePath) {
   try {
     const db = new DatabaseSync(databasePath, { readOnly: true });
     try {
+      // n8n 2 publishes a version rather than flipping `active`: its own CLI
+      // answers "Please use: publish:workflow" if you try the old way. A
+      // workflow published from the editor therefore has activeVersionId set
+      // and, at least in some paths, active still 0 — so reading only `active`
+      // misses exactly the triggers a learner switched on by hand, and the
+      // deploy quietly leaves them off. Both are read, and older builds without
+      // the column fall back to `active` alone.
+      const hasVersionColumn = db
+        .prepare("SELECT count(*) n FROM pragma_table_info('workflow_entity') WHERE name = 'activeVersionId'")
+        .get().n > 0;
+      const where = hasVersionColumn
+        ? "active = 1 OR activeVersionId IS NOT NULL"
+        : "active = 1";
       return db
-        .prepare("SELECT id FROM workflow_entity WHERE active = 1")
+        .prepare(`SELECT id FROM workflow_entity WHERE ${where}`)
         .all()
         .map((row) => String(row.id))
         .filter((id) => id !== MAIN_WORKFLOW);
@@ -170,7 +183,7 @@ function hasAnthropicCredential(databasePath) {
  * two nodes are missing a credential they are certain they set. They set it
  * again, push anything at all, and it happens again.
  */
-function savedCredentials(databasePath) {
+export function savedCredentials(databasePath) {
   const saved = new Map();
   if (!existsSync(databasePath)) {
     return saved;
@@ -202,7 +215,7 @@ function savedCredentials(databasePath) {
 }
 
 /** Every credential the agent holds, grouped by type. */
-function credentialsByType(databasePath) {
+export function credentialsByType(databasePath) {
   const byType = new Map();
   if (!existsSync(databasePath)) {
     return byType;
@@ -237,6 +250,34 @@ const CREDENTIAL_TYPE_FOR_NODE = new Map([
 ]);
 
 /**
+ * Puts one workflow's credential choices back into one stored copy of its
+ * nodes. Returns the "workflowId::nodeName" keys it filled, so that a fix
+ * applied to several stored copies of the same workflow counts as one fix.
+ */
+function fillNodeCredentials(workflowId, nodes, saved, byType) {
+  const filled = [];
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    if (node?.credentials && Object.keys(node.credentials).length > 0) {
+      continue;
+    }
+    const key = `${workflowId}::${node?.name}`;
+    const remembered = saved.get(key);
+    if (remembered) {
+      node.credentials = remembered;
+      filled.push(key);
+      continue;
+    }
+    const type = CREDENTIAL_TYPE_FOR_NODE.get(node?.type);
+    const candidates = type ? (byType.get(type) ?? []) : [];
+    if (candidates.length === 1) {
+      node.credentials = { [type]: { ...candidates[0] } };
+      filled.push(key);
+    }
+  }
+  return filled;
+}
+
+/**
  * Puts credential choices back after an import, and makes the obvious one where
  * there is no choice to make.
  *
@@ -245,59 +286,161 @@ const CREDENTIAL_TYPE_FOR_NODE = new Map([
  * there is nothing for anyone to decide, and asking them to pick it in three
  * separate places is a puzzle rather than a safeguard. Where there is more than
  * one, nothing is guessed.
+ *
+ * n8n keeps a workflow's nodes in two places: workflow_entity, which is what
+ * the editor shows, and a workflow_history row per version, which is what
+ * Publish validates and what a published workflow actually runs. An import
+ * rewrites both, so both are repaired here. Repairing only the first is how a
+ * learner ends up staring at a credential that is visibly set while Publish
+ * insists it is missing.
  */
-function restoreCredentials(databasePath, saved, byType) {
+export function restoreCredentials(databasePath, saved, byType) {
   if (!existsSync(databasePath)) {
     return 0;
   }
-  let repaired = 0;
+  const fixed = new Set();
   try {
     const db = new DatabaseSync(databasePath);
     try {
-      for (const row of db.prepare("SELECT id, nodes FROM workflow_entity").all()) {
+      const hasColumn = (name) =>
+        db
+          .prepare("SELECT count(*) n FROM pragma_table_info('workflow_entity') WHERE name = ?")
+          .get(name).n > 0;
+      const hasHistoryTable =
+        db
+          .prepare("SELECT count(*) n FROM sqlite_master WHERE type = 'table' AND name = 'workflow_history'")
+          .get().n > 0;
+      const hasVersionId = hasColumn("versionId");
+      const hasActiveVersionId = hasColumn("activeVersionId");
+      const columns = ["id", "nodes"];
+      if (hasVersionId) {
+        columns.push("versionId");
+      }
+      if (hasActiveVersionId) {
+        columns.push("activeVersionId");
+      }
+      for (const row of db.prepare(`SELECT ${columns.join(", ")} FROM workflow_entity`).all()) {
         let nodes;
         try {
           nodes = JSON.parse(row.nodes);
         } catch {
           continue;
         }
-        if (!Array.isArray(nodes)) {
-          continue;
-        }
-        let changed = false;
-        for (const node of nodes) {
-          if (node?.credentials && Object.keys(node.credentials).length > 0) {
-            continue;
-          }
-          const remembered = saved.get(`${row.id}::${node?.name}`);
-          if (remembered) {
-            node.credentials = remembered;
-            changed = true;
-            repaired += 1;
-            continue;
-          }
-          const type = CREDENTIAL_TYPE_FOR_NODE.get(node?.type);
-          const candidates = type ? (byType.get(type) ?? []) : [];
-          if (candidates.length === 1) {
-            node.credentials = { [type]: { ...candidates[0] } };
-            changed = true;
-            repaired += 1;
-          }
-        }
-        if (changed) {
+        const filled = fillNodeCredentials(row.id, nodes, saved, byType);
+        if (filled.length > 0) {
           db.prepare("UPDATE workflow_entity SET nodes = ? WHERE id = ?").run(
             JSON.stringify(nodes),
             row.id,
           );
+          for (const key of filled) {
+            fixed.add(key);
+          }
+        }
+        if (!hasHistoryTable || !hasVersionId) {
+          continue;
+        }
+        // The version the editor's Publish button will validate, and the
+        // version currently published, when there is one. Usually the same
+        // row; after an import, the one row the import just created.
+        const versionIds = new Set(
+          [row.versionId, hasActiveVersionId ? row.activeVersionId : null].filter(Boolean),
+        );
+        for (const versionId of versionIds) {
+          const version = db
+            .prepare("SELECT nodes FROM workflow_history WHERE workflowId = ? AND versionId = ?")
+            .get(row.id, versionId);
+          if (!version) {
+            continue;
+          }
+          let versionNodes;
+          try {
+            versionNodes = JSON.parse(version.nodes);
+          } catch {
+            continue;
+          }
+          const filledVersion = fillNodeCredentials(row.id, versionNodes, saved, byType);
+          if (filledVersion.length > 0) {
+            db.prepare(
+              "UPDATE workflow_history SET nodes = ? WHERE workflowId = ? AND versionId = ?",
+            ).run(JSON.stringify(versionNodes), row.id, versionId);
+            for (const key of filledVersion) {
+              fixed.add(key);
+            }
+          }
         }
       }
     } finally {
       db.close();
     }
   } catch {
-    return repaired;
+    return fixed.size;
   }
-  return repaired;
+  return fixed.size;
+}
+
+/**
+ * Trigger workflows the learner has wired to an outside account.
+ *
+ * Triggers are left alone by MUST_BE_LIVE on purpose: a funding or monthly
+ * trigger with no saved profile should not start itself. But a trigger that
+ * carries a credential is a different thing. Nobody creates a Telegram
+ * credential and binds it to three nodes by accident, and the cost of getting
+ * this wrong in the other direction is a bot that silently answers nobody —
+ * which is exactly the failure this project keeps hitting, because it looks
+ * identical to a bot that is working until someone messages it.
+ *
+ * Only triggers with a credential-bearing node qualify, so the credential-free
+ * triggers stay off, and only when every one of those nodes is actually bound.
+ */
+export function connectedTriggerIds(workflowsDir, databasePath) {
+  if (!existsSync(databasePath)) {
+    return [];
+  }
+  const needsCredential = new Map();
+  for (const { name, workflow } of readWorkflowFiles(workflowsDir)) {
+    if (!/^\d+-trigger-/.test(name) || typeof workflow.id !== "string") {
+      continue;
+    }
+    const nodeNames = (workflow.nodes ?? [])
+      .filter((node) => CREDENTIAL_TYPE_FOR_NODE.has(node?.type))
+      .map((node) => node?.name);
+    if (nodeNames.length > 0) {
+      needsCredential.set(workflow.id, nodeNames);
+    }
+  }
+  if (needsCredential.size === 0) {
+    return [];
+  }
+  const connected = [];
+  try {
+    const db = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      for (const [id, nodeNames] of needsCredential) {
+        const row = db.prepare("SELECT nodes FROM workflow_entity WHERE id = ?").get(id);
+        if (!row) {
+          continue;
+        }
+        let nodes;
+        try {
+          nodes = JSON.parse(row.nodes);
+        } catch {
+          continue;
+        }
+        const bound = (name) => {
+          const node = (Array.isArray(nodes) ? nodes : []).find((entry) => entry?.name === name);
+          return Boolean(node?.credentials && Object.keys(node.credentials).length > 0);
+        };
+        if (nodeNames.every(bound)) {
+          connected.push(id);
+        }
+      }
+    } finally {
+      db.close();
+    }
+  } catch {
+    return [];
+  }
+  return connected;
 }
 
 function runCli(n8nBin, args, env) {
@@ -345,6 +488,38 @@ export function syncWorkflows({ paths, n8nEnv, log }) {
     credentialPresent && state.mainPublished !== true;
 
   if (!workflowsChanged && !credentialAppeared) {
+    // Even with nothing to import, a credential may still be missing from a
+    // node: an earlier deploy cleared it, or the learner has only just made
+    // one. Both leave a trigger that cannot publish and says so in a way that
+    // sounds like they did something wrong. It is a read and a conditional
+    // write, so it is cheap enough to do on every boot rather than only on the
+    // deploys that happen to carry a workflow change.
+    const filled = restoreCredentials(
+      databasePath,
+      savedCredentials(databasePath),
+      credentialsByType(databasePath),
+    );
+    if (filled > 0) {
+      log(`  ${filled} credential ${filled === 1 ? "choice" : "choices"} restored.`);
+    }
+    // A connected trigger that is switched off has to be switched on here too,
+    // not only on the deploys that carry a workflow change. Otherwise the
+    // deploy that ships this repair is itself a deploy that imports nothing,
+    // and the repair does not run until something unrelated changes.
+    const live = new Set(learnerPublishedIds(databasePath));
+    const toStart = connectedTriggerIds(paths.workflowsDir, databasePath).filter(
+      (id) => !live.has(id),
+    );
+    let started = 0;
+    for (const id of toStart) {
+      const result = runCli(paths.n8nBin, ["publish:workflow", `--id=${id}`], n8nEnv);
+      if (!result.error && result.status === 0) {
+        started += 1;
+      }
+    }
+    if (started > 0) {
+      log(`  ${started} connected ${started === 1 ? "trigger is" : "triggers are"} switched back on.`);
+    }
     return { skipped: true, reason: "workflows unchanged since last deploy" };
   }
 
@@ -389,6 +564,9 @@ export function syncWorkflows({ paths, n8nEnv, log }) {
   const toPublish = new Set([
     ...requiredWorkflowIds(paths.workflowsDir),
     ...learnerPublished,
+    // Read after the restore above, so a credential that was just put back --
+    // or bound for the first time -- counts as connected.
+    ...connectedTriggerIds(paths.workflowsDir, databasePath),
   ]);
 
   let published = 0;

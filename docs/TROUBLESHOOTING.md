@@ -2,7 +2,7 @@
 
 ## Start with this table
 
-Run `diagnose.command` on macOS or `diagnose-windows.cmd` on Windows first. It does not call Claude or display credential values.
+Run `diagnose.command` on macOS or `diagnose-windows.cmd` on Windows first. It calls neither Claude nor DataForSEO and does not display credential values.
 
 | What you see | Most likely cause | First action |
 | --- | --- | --- |
@@ -17,7 +17,11 @@ Run `diagnose.command` on macOS or `diagnose-windows.cmd` on Windows first. It d
 | PDF says no readable text was found | The PDF is probably an image-only scan | Create a searchable PDF with trusted OCR software or paste reviewed text |
 | File type is unsupported | The file is not searchable PDF, DOCX, or UTF-8 TXT | Export it to a supported format and retry |
 | Diagnostic says the Anthropic credential is missing | The Claude node still references a nonexistent placeholder | Create `Anthropic account`, select it in the Claude node, save, and publish |
-| n8n Overview has no learner checklist | Automatic import was interrupted | Run the platform's `import-workflows` fallback |
+| Diagnostic says the DataForSEO credential is missing | Workflow `53` still references its safe placeholder | Create the `DataForSEO API` HTTP Basic Auth credential and select it on every DataForSEO node |
+| n8n Personal has no learner checklist | Automatic import was interrupted | Run the platform's `import-workflows` fallback |
+| n8n shows a flat list instead of skill folders | Looking at Overview, which never groups | Click **Personal** in the sidebar |
+| Personal is flat too | This n8n has no folder licence, which is normal | Nothing to fix; the agent works the same either way |
+| Personal looks empty after grouping | Workflows were filed into folders n8n cannot draw | Run `node scripts/local.mjs group-workflows --undo` and refresh |
 | Claude returns an authentication error | API key is invalid or revoked | Replace only the n8n credential; never put the key in a file |
 | Claude returns a credit/rate error | API billing or workspace limit | Check the Anthropic Console balance and limits |
 | Plain `yes` does not create a task | Expected safety behaviour | Send the exact, current `CONFIRM XXXXXXXX` phrase |
@@ -110,12 +114,12 @@ The browser intentionally does not show raw workflow errors or credentials.
 ## A workflow does not appear after import
 
 1. Confirm the terminal reported `Workflows imported successfully`.
-2. Refresh the n8n Overview.
+2. Refresh **Personal** in n8n and open each skill folder.
 3. Check that the local n8n owner account has been created.
 4. Run the import fallback again; the fixed workflow IDs prevent duplicate copies.
 5. Ask a technical helper to run `node scripts/local.mjs logs n8n`.
 
-First setup normally imports all fourteen workflows automatically. The main agent, health workflow, learner checklist, and temporary setup workflows remain inactive until viewed, run manually, or deliberately published. The import helper publishes the nine reviewed runtime dependencies automatically.
+First setup normally imports all eleven base workflows automatically. The main agent, health workflow, learner checklist, and temporary setup workflows remain inactive until viewed, run manually, or deliberately published. The import helper publishes the six reviewed runtime dependencies automatically. Installed optional skills add their own workflows.
 
 ## Claude credential is missing or invalid
 
@@ -133,6 +137,27 @@ An Anthropic web-chat subscription is separate from API access. Follow [N8N_AGEN
 Anthropic API use requires API billing and available usage credit. Open the Anthropic Console to check the workspace's usage, limits, and billing. Add only a small workshop budget and keep the supplied response and iteration limits.
 
 If billing is available, wait briefly and retry. Persistent 429 responses can also mean a workspace rate limit has been reached.
+
+## Paid domain research is unavailable, partial, or empty
+
+1. Open workflow `53 - TOOL - start_paid_domain_research` and confirm all six DataForSEO nodes use the `DataForSEO API` HTTP Basic Auth credential.
+2. Run the diagnostic helper. It checks credential selection without calling DataForSEO or showing credential values.
+
+3. Confirm the current chat explicitly asks for paid DataForSEO research or selects a named paid mode for the domain. A generic research request uses the free tool. Within an explicit paid request, standard research defaults to Australia and English; there is no ownership, permission, market-code, language-code, or second cost-confirmation question.
+4. Inspect the saved component statuses. `failed`, `no_results`, `unavailable`, and `skipped` mean different things and should not be reworded as findings.
+5. Do not automatically retry a failed paid request. The agent should use the free website-only fallback when no useful paid evidence was returned. Correct the credential, balance, market, or input before a later paid run.
+
+A failed attempt remains in local history and does not overwrite the last successful company memory. See [PAID_DOMAIN_RESEARCH.md](PAID_DOMAIN_RESEARCH.md).
+
+## An SEO article is still queued or failed
+
+1. Ask the agent to check the article again. Writing happens in the background and may take several minutes.
+2. Confirm the domain has saved research and at least four readable public source pages.
+3. Open workflow `57 - INTERNAL - write_seo_article` and check the failed execution. It should show a plain failure stage without storing a guessed draft.
+4. Confirm both Claude nodes use the existing `Anthropic account` credential.
+5. Run the skill sync helper after changing `skills/seo-article-writer/`.
+
+A failed run never replaces the latest successful review draft.
 
 ## The agent health endpoint does not work
 

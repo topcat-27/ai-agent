@@ -177,8 +177,8 @@ treated as Project Manager version 1 text requests.
 
 | Input | Limit |
 | --- | --- |
-| Normal message | 1–100,000 characters after trimming (raised locally for pasted transcripts) |
-| JSON chat body | 1,048,576 bytes |
+| Normal message | 1–8,000 characters after trimming |
+| JSON chat body | 65,536 bytes |
 | Files per request | 3 |
 | One uploaded file | 20 MB |
 | Extracted or pasted text per document | 150,000 characters |
@@ -344,61 +344,3 @@ The native packaging and agent smoke tests additionally prove:
   session remains isolated.
 - Agent output is capped.
 - Backup, reset, and restore preserve current-format chat history.
-
-## PitchUp additions
-
-These endpoints are local extensions to the course contract. They are additive:
-they do not change `/api/chat`, and the browser still sends the resulting text as
-a normal `message`.
-
-### Meeting-link ingest
-
-```http
-POST /api/ingest-url
-Content-Type: application/json
-```
-
-Request `{ "url": "https://fathom.video/share/<token>" }`; response
-`{ source, title, characters, truncated, text }`.
-
-| Rule | Value |
-| --- | --- |
-| Supported sources | `fathom.video/share/…` and `notes.granola.ai/t\|d/…` only |
-| Host allowlist | Re-checked on every redirect hop (SSRF guard) |
-| Response caps | 8 MB per fetch, 4 redirects, request timeout applies |
-| Extracted `text` | Trimmed, normalised, capped at 100,000 characters |
-
-Both services expose the shared meeting publicly to anyone holding the link, so no
-API key or login is used.
-
-### Transcript extraction from a file
-
-```http
-POST /api/upload
-Content-Type: application/json
-```
-
-Request `{ "filename": "notes.pdf", "dataBase64": "…" }`; response
-`{ filename, characters, truncated, text }`. Supports `.pdf`, `.docx`, `.txt`
-and `.md` up to 10 MB. This runs entirely in the gateway; the file never reaches
-n8n or Claude. For richer, persisted attachments prefer `/api/documents`.
-
-### Asana capture
-
-```http
-GET  /api/asana/meta
-POST /api/asana/create
-```
-
-`meta` returns `{ projects, members, defaultProjectGid }` for the review panel's
-dropdowns. `create` accepts `{ mode, projectGid, meetingTitle, tasks[] }` and is
-called only after a person edits the proposal and presses "Push to Asana".
-
-The Asana token lives only in the n8n credential store. The write path is the n8n
-workflow `51 - ASANA - Create Tasks`, which is deliberately not connected to any
-AI Tool node, so the model can propose tasks but can never create them.
-
-### Message limit
-
-The message limit is 100,000 characters so a full meeting transcript can be sent
-in one message. Conversation history sent to n8n stays bounded independently.

@@ -53,6 +53,12 @@ export interface ArticleBriefResearch {
   offeringProfile: Record<string, unknown>;
   selectedKeywords: Array<Record<string, unknown>>;
   keywordCandidates: Array<Record<string, unknown>>;
+  seoCompetitors: Array<Record<string, unknown>>;
+  competitors: {
+    direct: Array<Record<string, unknown>>;
+    seo: Array<Record<string, unknown>>;
+    adjacent: Array<Record<string, unknown>>;
+  };
   serpEvidence: Array<Record<string, unknown>>;
   sources: Array<Record<string, unknown>>;
   warnings: string[];
@@ -283,6 +289,12 @@ export function createArticleBriefData(input: {
       memory?.keywordCandidates ??
       []
     ).slice(0, 80),
+    seoCompetitors: (snapshot?.seoCompetitors ?? []).slice(0, 40),
+    competitors: {
+      direct: (memory?.competitors.direct ?? []).slice(0, 20),
+      seo: (memory?.competitors.seo ?? []).slice(0, 20),
+      adjacent: (memory?.competitors.adjacent ?? []).slice(0, 20),
+    },
     serpEvidence: (snapshot?.serpEvidence ?? []).slice(0, 40),
     sources: [...(snapshot?.sources ?? []), ...(memory?.sources ?? [])].slice(0, 120),
     warnings: [...(snapshot?.warnings ?? []), ...(memory?.warnings ?? [])].slice(0, 40),
@@ -343,20 +355,20 @@ export function requiresBoundaries(primaryKeyword: string): boolean {
 export function selectArticleOpportunity(
   brief: ArticleBriefRecord,
   input: {
-    primaryKeyword?: string;
+    requestedTopic?: string;
     selectionNumber?: number;
     chooseBest?: boolean;
   },
 ): ArticleOpportunity | undefined {
-  const primaryKeyword = text(input.primaryKeyword, 200).toLowerCase();
-  if (primaryKeyword) {
-    const existing = brief.opportunities.find(
-      (opportunity) => opportunity.primaryKeyword.toLowerCase() === primaryKeyword,
-    );
-    return existing ?? {
+  const requestedTopic = text(input.requestedTopic, 240);
+  if (requestedTopic) {
+    // A topic in the current request is an editorial constraint, not a lookup
+    // key for one of the saved numbered ideas. Always create a custom
+    // selection so a broader option cannot silently replace the user's words.
+    return {
       number: 0,
-      title: titleFor({ keyword: primaryKeyword, intent: "informational", relevance: 1 }),
-      primaryKeyword,
+      title: titleFor({ keyword: requestedTopic, intent: "informational", relevance: 1 }),
+      primaryKeyword: requestedTopic,
       supportingKeywords: [],
       intent: "informational",
       competition: "Not measured",

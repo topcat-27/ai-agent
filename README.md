@@ -2,7 +2,7 @@
 
 Build and personalise a useful Claude-powered project assistant on your own computer. No manual Node.js install is required: Claude Code or the one-click setup selects the reviewed Node.js 24.18.0 and npm 11.16.0 pair, downloading a verified private copy inside this project when that exact pair is not already available.
 
-**Local release:** `v0.2.0`
+**Local release:** `v0.3.0`
 
 If this is your first technical project, use the
 **[complete beginner getting-started guide](docs/GETTING_STARTED.md)**. It
@@ -16,7 +16,12 @@ In about 30 minutes you will have:
 - Claude connected through a private n8n credential.
 - PDF, DOCX, TXT, and long-transcript input.
 - Local project tasks and conversation memory.
-- Editable Markdown skills.
+- Five physically scoped agents with accessible role cards and saved settings.
+- Editable Markdown skills loaded only for their owning agent.
+- Free first-party domain research, with paid DataForSEO research as an
+  explicit optional upgrade.
+- Background SEO article drafts grounded in saved research and verified public sources.
+- An optional daily Funding Radar trigger that ships switched off.
 - Confirmation-gated task creation and status changes.
 
 Everything runs locally as ordinary Node.js processes. Nothing is deployed to the cloud in this release.
@@ -97,8 +102,11 @@ Success ends with:
 Local stack is healthy.
   Chat app:          http://localhost:3000
   n8n editor:        http://localhost:5678
+  Your agent's skills: http://localhost:5678/projects/xxxxxxxxxxxxxxxx/workflows
   Next: create the local n8n owner, then open 01 - START HERE - Learner Checklist.
 ```
+
+The skills link ends in a code unique to this computer. Copy the one your own terminal prints; it is the same page as clicking **Personal** in the n8n sidebar.
 
 If automatic workflow import is interrupted, wait for n8n to become healthy and use the manual fallback:
 
@@ -113,7 +121,7 @@ Open [http://localhost:5678](http://localhost:5678). On the first visit, create 
 
 ![The local n8n owner-account screen](docs/images/01-n8n-owner-setup.png)
 
-When the n8n Overview appears, open `01 - START HERE - Learner Checklist`. Its five cards take you through the remaining setup.
+When n8n finishes, click **Personal** in the left sidebar. That is where your agent's workflows live; the **Overview** page above it lists everything at once and is not needed. Open `01 - START HERE - Learner Checklist` — inside the `1. Start here` folder if this n8n groups workflows into skill folders. Its five cards take you through the remaining setup.
 
 ![The five-step learner checklist inside n8n](docs/images/02-n8n-learner-checklist.png)
 
@@ -125,8 +133,9 @@ When the n8n Overview appears, open `01 - START HERE - Learner Checklist`. Its f
 4. Open `00 - START HERE - Project Partner`.
 5. Open **Claude - Sonnet 4.6**, select `Anthropic account`, and save.
 6. If you will use domain research, open `50 - TOOL - start_domain_research` and check that **Analyse With Claude** shows `Anthropic account`. Import matches it by name, so usually it is already selected. If it is empty, select it and save.
-7. Select **Publish**.
-8. Open `90 - DEBUG - Agent Health` and select **Publish**.
+7. For paid DataForSEO research, follow [Paid Domain Research with DataForSEO](docs/PAID_DOMAIN_RESEARCH.md). Keep the API login and password only in the n8n Basic Auth credential named `DataForSEO API`.
+8. Select **Publish**.
+9. Open `90 - DEBUG - Agent Health` and select **Publish**.
 
 The key stays in n8n's encrypted credential store. The browser and chat gateway never receive it.
 
@@ -137,7 +146,7 @@ Run the friendly diagnostic:
 - macOS: double-click `diagnose.command`.
 - Windows: double-click `diagnose-windows.cmd`.
 
-The helper checks Node.js, all three local services, the installed checklist, the published agent, the selected Anthropic credential, and the health workflow. It does not call Claude and never displays credential values.
+The helper checks Node.js, all three local services, the installed checklist, the published agent, the selected Anthropic credential, the optional DataForSEO credential selection, and the health workflow. It calls neither provider and never displays credential values.
 
 Follow any yellow `[next]` line, then run it again. Continue when it reports:
 
@@ -211,13 +220,14 @@ Reset asks you to type `RESET`. The [operations and recovery guide](docs/LOCAL_O
 - A checksum-verified Node.js 24.18.0 and npm 11.16.0 bootstrap for macOS and Windows, stored only inside `.runtime/` when the computer needs it.
 - The exact pinned n8n release, installed with npm and kept in this project's folder.
 - A TypeScript chat gateway, custom browser interface, and isolated document reader.
-- Eleven reviewed n8n workflows, including the visual learner checklist.
+- Eleven reviewed base n8n workflows, plus self-contained optional-skill workflows installed only when needed.
 - Durable local SQLite chat history with browsing, full-text search, rename,
   deletion, and restart-safe bounded conversation memory.
 - Four local Data Tables for tasks, audits, pending confirmations, and enabled skills.
-- Four editable Markdown skills, including grounded meeting analysis.
-- A central agent registry with Project Manager active and Sales, Marketing,
-  Investment, and Bookkeeping shown as coming soon.
+- Four editable base Markdown skills, seven learner-facing skill packages, and
+  eleven retained optional modules/extensions behind those packages and add-ons.
+- A central registry with Project Manager, Sales, Marketing, Investment, and
+  Bookkeeping active; prompts and tool connections are isolated by role.
 - Local extraction for searchable PDFs, DOCX, TXT, and pasted text.
 - Automatic reads and exact, expiring, single-use confirmation for writes.
 - Local diagnostics, backup, restore, reset, import, export, and skill-sync helpers.
@@ -236,6 +246,8 @@ multi-user authentication, RAG, queues, and autonomous background work.
 - [Detailed local setup](docs/LOCAL_SETUP.md)
 - [GitHub Desktop workflow](docs/GITHUB_DESKTOP.md)
 - [Connect the visual agent to Claude](docs/N8N_AGENT_SETUP.md)
+- [Set up paid DataForSEO domain research](docs/PAID_DOMAIN_RESEARCH.md)
+- [Create grounded SEO article drafts](docs/SEO_ARTICLE_WRITER.md)
 - [Customise the chat](docs/CUSTOMISE_CHAT.md)
 - [Customise Markdown skills](docs/CUSTOMISE_SKILLS.md)
 - [Use documents and long transcripts](docs/DOCUMENT_UPLOADS.md)
@@ -283,7 +295,7 @@ The maintenance helpers are also available directly: `node scripts/local.mjs hel
 ## Current milestone
 
 Phases 0–8 of the local-first implementation plan are implemented for local
-release `v0.2.0`, using a verified project-local Node.js runtime throughout.
+release `v0.3.0`, using a verified project-local Node.js runtime throughout.
 The repository owner reviewed the experience and
 explicitly authorised Phase 8 without the planned five-person pilot. That
 waiver is recorded transparently: `pilot/results.json` remains `not_run` and

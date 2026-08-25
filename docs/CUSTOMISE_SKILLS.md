@@ -9,6 +9,7 @@ The starter agent includes:
 | Skill | What it changes |
 | --- | --- |
 | `project-assistant` | How the agent turns uncertainty into practical next steps |
+| `meeting-analysis` | How the agent grounds meeting summaries and action items |
 | `task-capture` | How the agent prepares a confirmation-gated task proposal |
 | `weekly-status` | How the agent summarises factual task progress |
 
@@ -37,6 +38,7 @@ Open `skills/enabled.txt`. It contains one skill ID per line:
 
 ```text
 project-assistant
+meeting-analysis
 task-capture
 weekly-status
 ```
@@ -47,74 +49,60 @@ weekly-status
 
 Run the skill-sync helper after every change. Only IDs in this file are compiled into the agent prompt. A skill directory that is not listed remains available as an example but is not loaded.
 
+`paid-domain-research` does not contain a credential and cannot grant provider access by itself. Its reviewed tools and private n8n credential are configured separately in [Paid Domain Research with DataForSEO](PAID_DOMAIN_RESEARCH.md).
+
 At least one skill must remain enabled.
 
-## Skill folder convention
+## Optional skill packages
 
-Every skill has two files:
+The agent card deliberately groups the internal modules into one Project
+Manager package, two Sales packages, two Marketing packages, one Investment
+package, and one Bookkeeping package. A full repository checkout keeps eleven
+optional modules in [`optional-skills/`](../optional-skills/). A generated
+learner base omits that large catalogue but retains the small `skill-packs/`
+contracts, so it can fetch only the requested modules from GitHub.
+
+Open [`optional-skills/README.md`](../optional-skills/README.md) for the full list, what each one costs, and what it needs.
+
+### Add one
+
+Ask Claude Code, in plain English:
 
 ```text
-skills/
-└── my-skill/
-    ├── skill.yaml
-    └── SKILL.md
+Add the funding-and-investor-updates package to my agent.
 ```
 
-`skill.yaml` contains four plain fields:
-
-```yaml
-id: my-skill
-name: My Skill
-version: 1.0.0
-description: Explain the behaviour this skill adds.
-```
-
-Rules:
-
-- `id` uses lowercase words separated by hyphens and matches the folder name.
-- `name` is 80 characters or fewer.
-- `version` uses three numbers such as `1.0.0`.
-- `description` is 240 characters or fewer.
-- `SKILL.md` contains 1-8,000 characters.
-- The combined enabled instructions may contain at most 24,000 characters.
-
-The helper rejects an invalid skill before changing the running agent. It stores a content hash alongside the compiled bundle so technical contributors can see exactly which version is active.
-
-## Write useful skill instructions
-
-Good instructions are:
-
-- Specific about the desired outcome.
-- Short enough to scan.
-- Clear about which facts require a tool.
-- Honest about unavailable data.
-- Explicit about what the agent must not claim.
-
-Avoid:
-
-- Pasting API keys or private customer data.
-- Telling the agent to ignore the base safety policy.
-- Granting new tools or service access in Markdown.
-- Asking it to silently change data.
-- Copying an entire company handbook into one skill.
-
-Skills influence model behaviour. They cannot grant a capability. Tool access comes only from the reviewed n8n connections and [tool-risk policy](SAFE_WRITE_CONFIRMATION.md#tool-risk-policy).
-
-## Recover from an error
-
-If the helper reports an invalid skill:
-
-1. Read the file and line named in the terminal.
-2. Compare `skill.yaml` with the four-field example above.
-3. Confirm the ID is listed exactly once in `skills/enabled.txt`.
-4. Save the correction and run the helper again.
-
-The previously synced bundle remains active when validation fails.
-
-Technical contributors can validate without changing n8n:
+Or run it yourself from the top of your project folder:
 
 ```bash
-node scripts/compile-skills.mjs
+npm run add-skill -- funding-and-investor-updates
 ```
 
-The [finished Launch Partner example](../examples/finished-solo-project-assistant/README.md) includes an alternative project-assistant skill for comparison. After testing a learner change in a new conversation, use [GitHub Desktop](GITHUB_DESKTOP.md) to commit and push the Markdown file.
+For Xero bookkeeping, install the package rather than either internal module:
+
+```bash
+npm run add-skill -- xero-bookkeeping
+```
+
+Then sync the skills and restart the services, exactly as you would after editing a skill by hand.
+
+The installer resolves package dependencies, copies each core module, wires up
+its workflows, and adds the module IDs to `skills/enabled.txt`. It preflights
+the cumulative shared-file changes, never overwrites customised files, and is
+idempotent. Add optional extensions such as Monthly Update with
+`--with-extensions`. Direct legacy module IDs remain supported.
+
+### One rule makes these work well
+
+- **Add one package at a time.** Every enabled module is loaded only for its
+  owning agent; the package boundary keeps related modules and formats together.
+
+Remove a skill's line from `skills/enabled.txt` to switch it off again without deleting anything.
+
+### What they can and cannot do
+
+Every retained optional skill declares what it reads, writes, and costs in its
+own README and manifest. Domain and funding research read public sources;
+LinkedIn lookup and paid SEO research call separately configured providers;
+Monthly Update reads Gmail through its read-only credential. None can post,
+message, apply, or contact anybody merely because researched text asks it to.

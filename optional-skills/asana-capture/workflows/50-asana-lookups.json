@@ -1,0 +1,208 @@
+{
+  "name": "50 - ASANA - Lookups",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Read-only Asana lookups\n\nReturns the active projects and workspace members used by the\nchat review panel's Project and Assignee dropdowns.\n\nThis workflow never writes to Asana. The Asana token stays in the\nn8n credential store; the browser and chat container never receive it.\n\nChange ASANA_WORKSPACE_GID in \"Workspace Config\" if you move workspaces.",
+        "height": 260,
+        "width": 460
+      },
+      "id": "asanaLookupsNote",
+      "name": "About this workflow",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        -220
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "asana-lookups",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "asanaLookupsWebhook",
+      "name": "Lookups Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -260,
+        60
+      ],
+      "webhookId": "asana-lookups"
+    },
+    {
+      "parameters": {
+        "jsCode": "// The workspace whose projects and members feed the review panel.\nconst ASANA_WORKSPACE_GID = '1215953080600773';\nconst DEFAULT_PROJECT_GID = '1215957632533059';\n\nreturn {\n  json: {\n    workspaceGid: ASANA_WORKSPACE_GID,\n    defaultProjectGid: DEFAULT_PROJECT_GID,\n  },\n};"
+      },
+      "id": "asanaWorkspaceConfig",
+      "name": "Workspace Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://app.asana.com/api/1.0/workspaces/{{ $json.workspaceGid }}/projects?limit=100&archived=false&opt_fields=name,archived",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "asanaApi",
+        "options": {}
+      },
+      "id": "asanaFetchProjects",
+      "name": "Fetch Projects",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        180,
+        60
+      ],
+      "credentials": {
+        "asanaApi": {
+          "id": "phase9Asana",
+          "name": "Asana account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://app.asana.com/api/1.0/workspaces/{{ $('Workspace Config').item.json.workspaceGid }}/users?limit=100&opt_fields=name,email",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "asanaApi",
+        "options": {}
+      },
+      "id": "asanaFetchMembers",
+      "name": "Fetch Members",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        60
+      ],
+      "credentials": {
+        "asanaApi": {
+          "id": "phase9Asana",
+          "name": "Asana account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const config = $('Workspace Config').first().json;\n\nconst projectRows = $('Fetch Projects').first().json.data ?? [];\nconst memberRows = $json.data ?? [];\n\nconst projects = projectRows\n  .filter((row) => row && row.gid && row.name && !row.archived)\n  .map((row) => ({ gid: String(row.gid), name: String(row.name) }))\n  .sort((a, b) => a.name.localeCompare(b.name));\n\nconst members = memberRows\n  .filter((row) => row && row.gid)\n  .map((row) => ({\n    gid: String(row.gid),\n    name: String(row.name ?? row.email ?? 'Unknown'),\n    email: String(row.email ?? ''),\n  }))\n  .sort((a, b) => a.name.localeCompare(b.name));\n\nreturn {\n  json: {\n    projects,\n    members,\n    defaultProjectGid: config.defaultProjectGid,\n  },\n};"
+      },
+      "id": "asanaShapeLookups",
+      "name": "Shape Lookups",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { projects: $json.projects, members: $json.members, defaultProjectGid: $json.defaultProjectGid } }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json; charset=utf-8"
+              }
+            ]
+          },
+          "enableStreaming": false
+        }
+      },
+      "id": "asanaReturnLookups",
+      "name": "Return Lookups",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        840,
+        60
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Lookups Webhook": {
+      "main": [
+        [
+          {
+            "node": "Workspace Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Workspace Config": {
+      "main": [
+        [
+          {
+            "node": "Fetch Projects",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Projects": {
+      "main": [
+        [
+          {
+            "node": "Fetch Members",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Members": {
+      "main": [
+        [
+          {
+            "node": "Shape Lookups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shape Lookups": {
+      "main": [
+        [
+          {
+            "node": "Return Lookups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 50,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true
+  },
+  "versionId": "asana-lookups-v1",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "phase": 9,
+    "testedWithN8n": "2.30.5"
+  },
+  "id": "phase9AsanaLookups",
+  "tags": []
+}

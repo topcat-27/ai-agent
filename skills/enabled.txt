@@ -3,7 +3,7 @@ project-assistant
 meeting-analysis
 task-capture
 weekly-status
-asana-capture
-lead-conversion
 domain-research
 telegram-trigger
+asana-capture
+lead-conversion

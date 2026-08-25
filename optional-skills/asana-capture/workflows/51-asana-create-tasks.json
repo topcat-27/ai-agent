@@ -1,0 +1,370 @@
+{
+  "name": "51 - ASANA - Create Tasks",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Asana write boundary\n\nThis workflow is the ONLY path that creates Asana tasks.\n\nIt is not connected to any AI Tool node, so the model can never call it.\nThe chat review panel calls it after a person has edited the proposed\ntasks and pressed \"Push to Asana\".\n\nEvery field is re-validated here; model prose is never trusted.",
+        "height": 260,
+        "width": 460
+      },
+      "id": "asanaCreateNote",
+      "name": "About this workflow",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -480,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "asana-create",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "asanaCreateWebhook",
+      "name": "Create Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -480,
+        60
+      ],
+      "webhookId": "asana-create"
+    },
+    {
+      "parameters": {
+        "jsCode": "const MAX_TASKS = 50;\nconst MAX_TITLE = 1024;\nconst MAX_NOTES = 4000;\n\nconst body = $json.body && typeof $json.body === 'object' && !Array.isArray($json.body)\n  ? $json.body\n  : {};\n\nconst invalid = (errorMessage) => ({\n  json: { valid: false, statusCode: 400, errorCode: 'INVALID_REQUEST', errorMessage },\n});\n\nconst mode = body.mode === 'grouped' ? 'grouped' : 'flat';\nconst projectGid = typeof body.projectGid === 'string' ? body.projectGid.trim() : '';\nif (!/^\\d+$/.test(projectGid)) {\n  return invalid('Choose an Asana project before pushing.');\n}\n\nconst rawTasks = Array.isArray(body.tasks) ? body.tasks : [];\nif (rawTasks.length === 0) {\n  return invalid('Select at least one task to push.');\n}\nif (rawTasks.length > MAX_TASKS) {\n  return invalid(`Push at most ${MAX_TASKS} tasks at a time.`);\n}\n\nconst tasks = [];\nfor (const raw of rawTasks) {\n  const source = raw && typeof raw === 'object' ? raw : {};\n  const title = typeof source.title === 'string' ? source.title.trim() : '';\n  if (title.length === 0) {\n    return invalid('Every task needs a title.');\n  }\n\n  const notes = typeof source.notes === 'string' ? source.notes.trim() : '';\n  const assigneeGid = typeof source.assigneeGid === 'string' ? source.assigneeGid.trim() : '';\n  const dueOn = typeof source.dueOn === 'string' ? source.dueOn.trim() : '';\n\n  if (assigneeGid && !/^\\d+$/.test(assigneeGid)) {\n    return invalid('An assignee was not recognised. Pick one from the list.');\n  }\n  if (dueOn && !/^\\d{4}-\\d{2}-\\d{2}$/.test(dueOn)) {\n    return invalid('Due dates must look like 2026-07-30.');\n  }\n\n  tasks.push({\n    title: title.slice(0, MAX_TITLE),\n    notes: notes.slice(0, MAX_NOTES),\n    assigneeGid,\n    dueOn,\n  });\n}\n\nconst meetingTitle = typeof body.meetingTitle === 'string' && body.meetingTitle.trim()\n  ? body.meetingTitle.trim().slice(0, MAX_TITLE)\n  : 'Meeting actions';\n\nreturn {\n  json: { valid: true, mode, projectGid, meetingTitle, tasks, grouped: mode === 'grouped' },\n};"
+      },
+      "id": "asanaValidateCreate",
+      "name": "Validate Create Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -260,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "51000000-0000-4000-8000-000000000101",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "asanaCreateIsValid",
+      "name": "Create Request Is Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -40,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "51000000-0000-4000-8000-000000000102",
+              "leftValue": "={{ $json.grouped }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "asanaGroupUnderParent",
+      "name": "Group Under Parent?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        180,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://app.asana.com/api/1.0/tasks?opt_fields=name,permalink_url",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "asanaApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ data: { name: $json.meetingTitle, projects: [$json.projectGid] } }) }}",
+        "options": {}
+      },
+      "id": "asanaCreateParent",
+      "name": "Create Parent Task",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        -140
+      ],
+      "credentials": {
+        "asanaApi": {
+          "id": "phase9Asana",
+          "name": "Asana account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const info = $('Validate Create Request').first().json;\n\n// The parent node only runs in grouped mode; referencing it otherwise throws.\nlet parentGid = '';\ntry {\n  const parent = $('Create Parent Task').first().json;\n  parentGid = String(parent?.data?.gid ?? '');\n} catch (error) {\n  parentGid = '';\n}\n\nreturn info.tasks.map((task) => {\n  const data = { name: task.title };\n  if (task.notes) {\n    data.notes = task.notes;\n  }\n  if (task.dueOn) {\n    data.due_on = task.dueOn;\n  }\n  if (task.assigneeGid) {\n    data.assignee = task.assigneeGid;\n  }\n  if (parentGid) {\n    // Subtasks inherit their parent's project.\n    data.parent = parentGid;\n  } else {\n    data.projects = [info.projectGid];\n  }\n  return { json: { body: { data } } };\n});"
+      },
+      "id": "asanaFanOutTasks",
+      "name": "Fan Out Tasks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://app.asana.com/api/1.0/tasks?opt_fields=name,permalink_url",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "asanaApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {}
+      },
+      "id": "asanaCreateTask",
+      "name": "Create Task",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        840,
+        60
+      ],
+      "credentials": {
+        "asanaApi": {
+          "id": "phase9Asana",
+          "name": "Asana account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const info = $('Validate Create Request').first().json;\n\nlet parent = null;\ntry {\n  const raw = $('Create Parent Task').first().json;\n  if (raw?.data?.gid) {\n    parent = {\n      gid: String(raw.data.gid),\n      name: String(raw.data.name ?? ''),\n      url: String(raw.data.permalink_url ?? ''),\n    };\n  }\n} catch (error) {\n  parent = null;\n}\n\nconst created = $input\n  .all()\n  .map((item) => {\n    const data = item.json?.data ?? {};\n    return {\n      gid: String(data.gid ?? ''),\n      name: String(data.name ?? ''),\n      url: String(data.permalink_url ?? ''),\n    };\n  })\n  .filter((task) => task.gid);\n\nreturn {\n  json: { created, parent, mode: info.mode, count: created.length },\n};"
+      },
+      "id": "asanaCollectCreated",
+      "name": "Collect Created",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1060,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { created: $json.created, parent: $json.parent, mode: $json.mode, count: $json.count } }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json; charset=utf-8"
+              }
+            ]
+          },
+          "enableStreaming": false
+        }
+      },
+      "id": "asanaReturnCreated",
+      "name": "Return Created",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1280,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { error: { code: $json.errorCode, message: $json.errorMessage } } }}",
+        "options": {
+          "responseCode": "={{ $json.statusCode }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json; charset=utf-8"
+              }
+            ]
+          },
+          "enableStreaming": false
+        }
+      },
+      "id": "asanaReturnInvalid",
+      "name": "Return Invalid Create",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        180,
+        220
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Create Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Create Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Create Request": {
+      "main": [
+        [
+          {
+            "node": "Create Request Is Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Request Is Valid?": {
+      "main": [
+        [
+          {
+            "node": "Group Under Parent?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Invalid Create",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Group Under Parent?": {
+      "main": [
+        [
+          {
+            "node": "Create Parent Task",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fan Out Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Parent Task": {
+      "main": [
+        [
+          {
+            "node": "Fan Out Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fan Out Tasks": {
+      "main": [
+        [
+          {
+            "node": "Create Task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Task": {
+      "main": [
+        [
+          {
+            "node": "Collect Created",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Created": {
+      "main": [
+        [
+          {
+            "node": "Return Created",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 50,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true
+  },
+  "versionId": "asana-create-v1",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "phase": 9,
+    "testedWithN8n": "2.30.5"
+  },
+  "id": "phase9AsanaCreate",
+  "tags": []
+}

@@ -34,6 +34,7 @@ import {
   type HistoryMessage,
   type PaidComponentStatus,
   type SeoArticleJobInput,
+  type SeoArticleJobRecord,
   type SeoArticleJobStatus,
   type SeoArticleVersionInput,
   type SeoSnapshotInput,
@@ -61,23 +62,34 @@ import {
 } from "./ingest.js";
 import { fetchPublicDomainPage, fetchPublicWebPages } from "./public-web.js";
 import { validateSeoArticleResult } from "./seo-article.js";
+import {
+  buildArticleTopicStrategy,
+  isSeoArticleStage,
+  SEO_ARTICLE_RESEARCH_COST_LIMIT_USD,
+  type ArticleKeywordCandidate,
+  type ArticleStrategyEvidenceSource,
+  type SeoArticleStage,
+} from "./article-strategy.js";
 
-// PitchUp: raised from upstream's 8_000 so full meeting transcripts fit.
-const MAX_MESSAGE_LENGTH = 100_000;
-const MAX_TRANSCRIPT_LENGTH = MAX_MESSAGE_LENGTH;
+const MAX_MESSAGE_LENGTH = 8_000;
+// PitchUp: an ingested meeting transcript is attached as a document, so it is
+// bounded by the document limit rather than the message limit.
+const MAX_TRANSCRIPT_LENGTH = MAX_PASTED_CHARACTERS;
 const MAX_URL_LENGTH = 2_048;
 const GID_PATTERN = /^\d+$/;
 const DUE_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_ASANA_TASKS = 50;
 // A saved picture is base64 inside the JSON body, so this endpoint alone needs
 // more room than the 64 KB used by every other request.
 const MAX_PROFILE_REQUEST_BYTES = 512 * 1_024;
 const MAX_BUSINESS_MEMORY_REQUEST_BYTES = 256 * 1_024;
 const MAX_PAID_RESEARCH_REQUEST_BYTES = 1_024 * 1_024;
 const MAX_SEO_ARTICLE_REQUEST_BYTES = 1_024 * 1_024;
-const MAX_ASANA_TASKS = 50;
-// PitchUp: raised from upstream's 65_536 for transcript-sized uploads.
-const MAX_REQUEST_BYTES = 1_048_576;
+const MAX_REQUEST_BYTES = 65_536;
 const MAX_UPSTREAM_BYTES = 65_536;
+// Where a learner's own browser finds n8n when nothing says otherwise, which
+// is the case on their own computer. A hosted kit passes its real address in.
+const DEFAULT_N8N_PUBLIC_URL = "http://localhost:5678";
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -121,8 +133,8 @@ type ErrorCode =
   | "SEO_ARTICLE_ERROR"
   | "SEO_ARTICLE_NOT_FOUND"
   | "TOO_MANY_DOCUMENTS"
-  | "UNSUPPORTED_SOURCE"
-  | "UNSUPPORTED_FILE_TYPE";
+  | "UNSUPPORTED_FILE_TYPE"
+  | "UNSUPPORTED_SOURCE";
 
 interface ChatRequest {
   requestId: string;
@@ -161,6 +173,13 @@ interface ChatResponse {
 export interface ChatGatewayOptions {
   publicDirectory: string;
   upstreamUrl: string;
+  /**
+   * Where n8n is in a browser, which is not where the gateway reaches it: the
+   * gateway talks to loopback, while the learner has to be sent somewhere
+   * their own browser can open. Locally those differ only by hostname; on a
+   * hosted kit they are entirely different addresses.
+   */
+  n8nPublicUrl?: string;
   timeoutMs?: number;
   fetchImplementation?: typeof fetch;
   logError?: (message: string, error?: unknown) => void;
@@ -170,6 +189,7 @@ export interface ChatGatewayOptions {
   profileStore?: ProfileStore;
   agentSettingsStore?: AgentSettingsStore;
   skillsDirectory?: string;
+  skillPacksDirectory?: string;
   profileDirectory?: string;
   /**
    * Guards every route except /health. Omitted on a learner's own computer,
@@ -600,7 +620,7 @@ interface SeoArticleStartRequest {
   sessionId: string;
   requestId: string;
   domain: string;
-  primaryKeyword: string;
+  requestedTopic: string;
   selectionNumber?: number;
   chooseStrongestKeyword: boolean;
   supportingKeywords: string[];
@@ -614,16 +634,40 @@ function validateSeoArticleStartRequest(body: unknown): SeoArticleStartRequest {
   const sessionId = validateSessionId(candidate.sessionId);
   const requestId = validateSessionId(candidate.requestId);
   const domain = validateBusinessDomain(candidate.domain);
-  const primaryKeyword = businessMemoryText(candidate.primaryKeyword ?? "", "primary keyword", 200);
+  const preferredTopic = businessMemoryText(
+    candidate.requestedTopic ?? "",
+    "requested article topic",
+    240,
+  );
+  const legacyTopic = businessMemoryText(
+    candidate.primaryKeyword ?? "",
+    "legacy article topic",
+    240,
+  );
+  if (preferredTopic && legacyTopic && preferredTopic !== legacyTopic) {
+    throw new PublicError(400, "INVALID_REQUEST", "Use one article topic.");
+  }
+  const requestedTopic = preferredTopic || legacyTopic;
   const rawSelection = candidate.selectionNumber ?? candidate.articleChoice;
-  const selectionNumber = rawSelection === undefined || rawSelection === ""
-    ? undefined
-    : Number(rawSelection);
+  const selectionNumber =
+    rawSelection === undefined || rawSelection === "" || Number(rawSelection) === 0
+      ? undefined
+      : Number(rawSelection);
   if (
     selectionNumber !== undefined &&
     (!Number.isInteger(selectionNumber) || selectionNumber < 1 || selectionNumber > 3)
   ) {
     throw new PublicError(400, "INVALID_REQUEST", "Choose article 1, 2 or 3.");
+  }
+  if (
+    requestedTopic &&
+    (selectionNumber !== undefined || candidate.chooseStrongestKeyword === true)
+  ) {
+    throw new PublicError(
+      400,
+      "INVALID_REQUEST",
+      "Use one article topic, numbered idea, or choose-for-me instruction.",
+    );
   }
   const supportingKeywords = businessMemoryStringArray(
     candidate.supportingKeywords ?? [],
@@ -646,7 +690,7 @@ function validateSeoArticleStartRequest(body: unknown): SeoArticleStartRequest {
     sessionId,
     requestId,
     domain,
-    primaryKeyword,
+    requestedTopic,
     ...(selectionNumber === undefined ? {} : { selectionNumber }),
     chooseStrongestKeyword: candidate.chooseStrongestKeyword === true,
     supportingKeywords,
@@ -715,7 +759,7 @@ function prepareSeoArticleJob(
     );
   }
   const opportunity = selectArticleOpportunity(brief, {
-    primaryKeyword: request.primaryKeyword,
+    requestedTopic: request.requestedTopic,
     ...(request.selectionNumber === undefined
       ? {}
       : { selectionNumber: request.selectionNumber }),
@@ -769,6 +813,12 @@ function prepareSeoArticleJob(
       requestId: request.requestId,
       domain: request.domain,
       briefId: brief.briefId,
+      requestedTopic: request.requestedTopic || opportunity.title,
+      topicSource: request.requestedTopic
+        ? "custom"
+        : request.chooseStrongestKeyword
+          ? "choose_best"
+          : opportunity.number === 0 ? "custom" : "numbered_idea",
       primaryKeyword: opportunity.primaryKeyword,
       supportingKeywords,
       input: {
@@ -789,7 +839,7 @@ function validateSeoArticleJobUpdate(body: unknown): {
   sessionId: string;
   jobId: string;
   status: SeoArticleJobStatus;
-  stage: string;
+  stage: SeoArticleStage;
   errorCode?: string;
   errorMessage?: string;
 } {
@@ -804,25 +854,95 @@ function validateSeoArticleJobUpdate(body: unknown): {
   }
   const errorCode = businessMemoryText(candidate.errorCode ?? "", "article error code", 100);
   const errorMessage = businessMemoryText(candidate.errorMessage ?? "", "article error message", 2_000);
+  if (!isSeoArticleStage(candidate.stage)) {
+    throw new PublicError(400, "INVALID_REQUEST", "The article job has an invalid stage.");
+  }
   return {
     sessionId: validateSessionId(candidate.sessionId),
     jobId: businessMemoryText(candidate.jobId, "article job ID", 160),
     status: candidate.status as SeoArticleJobStatus,
-    stage: businessMemoryText(candidate.stage, "article stage", 80),
+    stage: candidate.stage,
     ...(errorCode ? { errorCode } : {}),
     ...(errorMessage ? { errorMessage } : {}),
   };
 }
 
+function validateSeoArticleStrategyRequest(body: unknown): {
+  sessionId: string;
+  jobId: string;
+  candidates: ArticleKeywordCandidate[];
+  evidenceSource: ArticleStrategyEvidenceSource;
+  market: string;
+  language: string;
+  actualCostUsd: number;
+  capturedAt?: string;
+  warnings: string[];
+  excludedMeanings: string[];
+} {
+  const candidate = businessMemoryObject(body, "article strategy request");
+  const evidenceSources: ArticleStrategyEvidenceSource[] = [
+    "fresh_saved_snapshot",
+    "topic_specific_paid_research",
+    "saved_or_free_fallback",
+  ];
+  if (!evidenceSources.includes(candidate.evidenceSource as ArticleStrategyEvidenceSource)) {
+    throw new PublicError(400, "INVALID_REQUEST", "The article strategy has an invalid evidence source.");
+  }
+  const actualCostUsd = Number(candidate.actualCostUsd ?? 0);
+  if (
+    !Number.isFinite(actualCostUsd) ||
+    actualCostUsd < 0 ||
+    actualCostUsd > SEO_ARTICLE_RESEARCH_COST_LIMIT_USD
+  ) {
+    throw new PublicError(400, "INVALID_REQUEST", "The article strategy has an invalid cost.");
+  }
+  const candidates = businessMemoryObjectArray(
+    candidate.candidates ?? [],
+    "article keyword candidates",
+    500,
+  ).map((item) => ({
+    keyword: businessMemoryText(item.keyword ?? "", "article keyword", 200),
+    intent: businessMemoryText(item.intent ?? "", "article keyword intent", 40),
+    ...(item.searchVolume === undefined ? {} : { searchVolume: Number(item.searchVolume) }),
+    ...(item.difficulty === undefined ? {} : { difficulty: Number(item.difficulty) }),
+    ...(item.relevance === undefined ? {} : { relevance: Number(item.relevance) }),
+    source: businessMemoryText(item.source ?? "", "article keyword source", 80),
+    language: businessMemoryText(item.language ?? "", "article keyword language", 20),
+    market: businessMemoryText(item.market ?? "", "article keyword market", 80),
+    ...(item.serpFormatMatch === undefined
+      ? {}
+      : { serpFormatMatch: Number(item.serpFormatMatch) }),
+  }));
+  const capturedAt = businessMemoryText(candidate.capturedAt ?? "", "article strategy date", 80);
+  if (capturedAt && Number.isNaN(Date.parse(capturedAt))) {
+    throw new PublicError(400, "INVALID_REQUEST", "The article strategy date is invalid.");
+  }
+  return {
+    sessionId: validateSessionId(candidate.sessionId),
+    jobId: businessMemoryText(candidate.jobId, "article job ID", 160),
+    candidates,
+    evidenceSource: candidate.evidenceSource as ArticleStrategyEvidenceSource,
+    market: businessMemoryText(candidate.market ?? "Australia", "article market", 80),
+    language: businessMemoryText(candidate.language ?? "en", "article language", 20),
+    actualCostUsd,
+    ...(capturedAt ? { capturedAt } : {}),
+    warnings: businessMemoryStringArray(candidate.warnings ?? [], "article strategy warnings", 40, 1_000),
+    excludedMeanings: businessMemoryStringArray(
+      candidate.excludedMeanings ?? [],
+      "article strategy exclusions",
+      40,
+      200,
+    ),
+  };
+}
+
 function articleVersionInput(
   candidate: Record<string, unknown>,
-  primaryKeyword: string,
-  domain: string,
-  supportingKeywords: string[],
+  job: SeoArticleJobRecord,
 ): SeoArticleVersionInput {
   let result;
   try {
-    result = validateSeoArticleResult(candidate.result, primaryKeyword);
+    result = validateSeoArticleResult(candidate.result, job.primaryKeyword, job.requestedTopic);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Invalid article result";
     throw new PublicError(400, "INVALID_REQUEST", `The article result could not be saved: ${message}.`);
@@ -834,14 +954,42 @@ function articleVersionInput(
       `The draft did not pass its final checks: ${result.qualityReport.errors.join(" ")}`,
     );
   }
+  const reviewMetadata = job.strategy === undefined
+    ? ""
+    : [
+        "<!-- SEO REVIEW METADATA",
+        `Requested topic: ${job.requestedTopic.replace(/-->/g, "—")}`,
+        `Primary keyword: ${job.strategy.primaryKeyword.replace(/-->/g, "—")}`,
+        `Supporting keywords: ${job.strategy.supportingKeywords.map((entry) => entry.keyword).join(", ") || "None"}`,
+        `Search intent: ${job.strategy.searchIntent}`,
+        `Rationale: ${job.strategy.rationale.replace(/-->/g, "—")}`,
+        `Evidence: ${job.strategy.evidenceSource}; ${job.strategy.market}; ${job.strategy.capturedAt}`,
+        `Measured provider cost: US$${job.strategy.actualCostUsd.toFixed(6)}`,
+        ...(job.strategy.warnings.length === 0
+          ? []
+          : [`Warnings: ${job.strategy.warnings.join(" | ").replace(/-->/g, "—")}`]),
+        "-->",
+      ].join("\n");
   return {
     status: result.status,
-    domain,
-    primaryKeyword,
-    supportingKeywords,
-    context: businessMemoryObject(candidate.context ?? {}, "article context"),
-    plan: result.plan,
-    markdown: result.markdown,
+    domain: job.domain,
+    primaryKeyword: job.primaryKeyword,
+    supportingKeywords: job.supportingKeywords,
+    context: {
+      ...businessMemoryObject(candidate.context ?? {}, "article context"),
+      requestedTopic: job.requestedTopic,
+      topicSource: job.topicSource,
+      ...(job.strategy === undefined ? {} : { articleStrategy: job.strategy }),
+    },
+    plan: {
+      ...result.plan,
+      requestedTopic: job.requestedTopic,
+      primaryKeyword: job.primaryKeyword,
+      ...(job.strategy === undefined ? {} : { articleStrategy: job.strategy }),
+    },
+    markdown: reviewMetadata && !result.markdown.includes("<!-- SEO REVIEW METADATA")
+      ? `${result.markdown.trimEnd()}\n\n${reviewMetadata}\n`
+      : result.markdown,
     structuredData: result.structuredData,
     metadata: {
       seoTitle: result.seoTitle,
@@ -1563,6 +1711,7 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
                 options.skillsDirectory,
                 options.profileDirectory,
                 (message) => options.logError?.(message),
+                options.skillPacksDirectory,
               )
             : publicAgentDefinitions(agents).map((agent) => ({
                 ...agent,
@@ -1922,6 +2071,10 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
             return;
           }
           const sessionId = validateSessionId(url.searchParams.get("sessionId"));
+          // This is the endpoint the transcript progress card polls. Reconcile
+          // a worker that outlived n8n's execution window before returning the
+          // linked brief, otherwise the card could remain on "writing" forever.
+          chatStore.expireStaleSeoArticleJobs(sessionId);
           const requestedDomain = url.searchParams.get("domain");
           const brief = chatStore.getLatestArticleBrief(
             sessionId,
@@ -1940,6 +2093,17 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
           const version = job?.latestVersionId
             ? chatStore.getSeoArticleVersionForJob(sessionId, job.jobId, job.latestVersionId)
             : undefined;
+          const previousVersion = job !== undefined && version === undefined
+            ? chatStore.getLatestSuccessfulSeoArticleVersion(sessionId, brief.domain)
+            : undefined;
+          const safeArticle = (articleVersion: NonNullable<typeof version>) => ({
+            status: articleVersion.status,
+            metadata: articleVersion.metadata,
+            warnings: articleVersion.warnings,
+            qualityReport: articleVersion.qualityReport,
+            createdAt: articleVersion.createdAt,
+            downloadUrl: `/api/seo-article/download/${articleVersion.downloadToken}.md`,
+          });
           sendJson(response, 200, {
             schemaVersion: 1,
             brief: {
@@ -1959,18 +2123,34 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
               createdAt: brief.createdAt,
               updatedAt: brief.updatedAt,
             },
-            ...(job === undefined ? {} : { job }),
-            ...(version === undefined
+            ...(job === undefined
               ? {}
               : {
-                  article: {
-                    status: version.status,
-                    metadata: version.metadata,
-                    warnings: version.warnings,
-                    createdAt: version.createdAt,
-                    downloadUrl: `/api/seo-article/download/${version.downloadToken}.md`,
+                  job: {
+                    status: job.status,
+                    stage: job.stage,
+                    requestedTopic: job.requestedTopic,
+                    primaryKeyword: job.primaryKeyword,
+                    strategy: job.strategy === undefined
+                      ? undefined
+                      : {
+                          primaryKeyword: job.strategy.primaryKeyword,
+                          rationale: job.strategy.rationale,
+                          evidenceSource: job.strategy.evidenceSource,
+                          warnings: job.strategy.warnings,
+                        },
+                    errorCode: job.errorCode,
+                    errorMessage: job.errorMessage,
+                    createdAt: job.createdAt,
+                    updatedAt: job.updatedAt,
                   },
                 }),
+            ...(version === undefined
+              ? {}
+              : { article: safeArticle(version) }),
+            ...(previousVersion === undefined
+              ? {}
+              : { previousArticle: safeArticle(previousVersion) }),
           });
         } catch (error) {
           if (error instanceof PublicError) sendError(response, error);
@@ -2039,6 +2219,10 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
           }
           if (request.method === "GET") {
             const sessionId = validateSessionId(url.searchParams.get("sessionId"));
+            // n8n's execution timeout cannot update the job after a hard worker
+            // crash. Reconcile it on the progress read so the UI cannot poll a
+            // dead attempt forever.
+            chatStore.expireStaleSeoArticleJobs(sessionId);
             const jobId = url.searchParams.get("jobId");
             const domain = url.searchParams.get("domain");
             const job = jobId !== null
@@ -2118,6 +2302,65 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
         return;
       }
 
+      if (url.pathname === "/api/seo-article/strategy") {
+        try {
+          if (request.method !== "PUT") {
+            sendJson(
+              response,
+              405,
+              { error: { code: "INVALID_REQUEST", message: "That method is not supported." } },
+              { Allow: "PUT" },
+            );
+            return;
+          }
+          const input = validateSeoArticleStrategyRequest(
+            await readRequestBody(request, MAX_SEO_ARTICLE_REQUEST_BYTES),
+          );
+          const current = chatStore.getSeoArticleJob(input.sessionId, input.jobId);
+          if (current === undefined) {
+            throw new PublicError(
+              404,
+              "SEO_ARTICLE_NOT_FOUND",
+              "That article job is not saved for this conversation.",
+            );
+          }
+          const strategy = buildArticleTopicStrategy({
+            requestedTopic: current.requestedTopic,
+            candidates: input.candidates,
+            evidenceSource: input.evidenceSource,
+            market: input.market,
+            language: input.language,
+            actualCostUsd: input.actualCostUsd,
+            ...(input.capturedAt === undefined ? {} : { capturedAt: input.capturedAt }),
+            warnings: input.warnings,
+            excludedMeanings: input.excludedMeanings,
+          });
+          let job;
+          try {
+            job = chatStore.saveSeoArticleStrategy(input.sessionId, input.jobId, strategy);
+          } catch (error) {
+            throw new PublicError(
+              422,
+              "SEO_ARTICLE_ERROR",
+              error instanceof Error
+                ? error.message
+                : "The article strategy could not be saved safely.",
+            );
+          }
+          sendJson(response, 200, { schemaVersion: 1, job, strategy });
+        } catch (error) {
+          if (error instanceof PublicError) sendError(response, error);
+          else {
+            options.logError?.("Could not prepare the SEO article strategy", error);
+            sendError(
+              response,
+              new PublicError(500, "SEO_ARTICLE_ERROR", "The article strategy could not be prepared."),
+            );
+          }
+        }
+        return;
+      }
+
       if (url.pathname === "/api/seo-article/context") {
         try {
           if (request.method !== "GET") {
@@ -2138,8 +2381,12 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
           const brief = job.briefId
             ? chatStore.getArticleBrief(sessionId, job.briefId)
             : undefined;
-          const memory = brief === undefined ? chatStore.getBusinessMemory(job.domain) : undefined;
-          const snapshot = brief === undefined ? chatStore.getLatestSeoSnapshot(job.domain) : undefined;
+          // A compact saved brief is useful for reproducibility, but it does not
+          // contain every source-discovery field (notably the full competitor
+          // lists). Return the current records as well so old briefs cannot hide
+          // valid public sources from the writer.
+          const memory = chatStore.getBusinessMemory(job.domain);
+          const snapshot = chatStore.getLatestSeoSnapshot(job.domain);
           const profile = profileStore === undefined ? undefined : await profileStore.read();
           sendJson(response, 200, {
             schemaVersion: 1,
@@ -2154,6 +2401,75 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
           else {
             options.logError?.("Could not prepare SEO article context", error);
             sendError(response, new PublicError(500, "SEO_ARTICLE_ERROR", "The saved research could not be prepared."));
+          }
+        }
+        return;
+      }
+
+      if (url.pathname === "/api/seo-article/capabilities") {
+        if (request.method !== "GET") {
+          sendJson(
+            response,
+            405,
+            { error: { code: "INVALID_REQUEST", message: "That method is not supported." } },
+            { Allow: "GET" },
+          );
+        } else {
+          sendJson(response, 200, {
+            schemaVersion: 1,
+            seoArticleWriterHostContract: 2,
+          });
+        }
+        return;
+      }
+
+      if (url.pathname === "/api/seo-article/validate") {
+        try {
+          if (request.method !== "POST") {
+            sendJson(
+              response,
+              405,
+              { error: { code: "INVALID_REQUEST", message: "That method is not supported." } },
+              { Allow: "POST" },
+            );
+            return;
+          }
+          const candidate = businessMemoryObject(
+            await readRequestBody(request, MAX_SEO_ARTICLE_REQUEST_BYTES),
+            "article validation",
+          );
+          const sessionId = validateSessionId(candidate.sessionId);
+          const jobId = businessMemoryText(candidate.jobId, "article job ID", 160);
+          const job = chatStore.getSeoArticleJob(sessionId, jobId);
+          if (job === undefined) {
+            throw new PublicError(404, "SEO_ARTICLE_NOT_FOUND", "That article job is not saved for this conversation.");
+          }
+          try {
+            const result = validateSeoArticleResult(
+              candidate.result,
+              job.primaryKeyword,
+              job.requestedTopic,
+            );
+            sendJson(response, 200, {
+              schemaVersion: 1,
+              valid: result.qualityReport.passed,
+              errors: result.qualityReport.errors,
+              warnings: result.qualityReport.warnings,
+              qualityReport: result.qualityReport,
+            });
+          } catch (error) {
+            sendJson(response, 200, {
+              schemaVersion: 1,
+              valid: false,
+              errors: [error instanceof Error ? error.message : "Invalid article result"],
+              warnings: [],
+            });
+          }
+        } catch (error) {
+          if (error instanceof PublicError) sendError(response, error);
+          else {
+            options.logError?.("Could not validate SEO article version", error);
+            sendError(response, new PublicError(500, "SEO_ARTICLE_ERROR", "The article could not be validated."));
           }
         }
         return;
@@ -2180,10 +2496,17 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
           if (job === undefined) {
             throw new PublicError(404, "SEO_ARTICLE_NOT_FOUND", "That article job is not saved for this conversation.");
           }
+          if (job.status !== "queued" && job.status !== "running") {
+            throw new PublicError(
+              409,
+              "SEO_ARTICLE_ERROR",
+              "That article attempt is no longer active, so a late worker cannot replace its final status.",
+            );
+          }
           const saved = chatStore.saveSeoArticleVersion(
             sessionId,
             jobId,
-            articleVersionInput(candidate, job.primaryKeyword, job.domain, job.supportingKeywords),
+            articleVersionInput(candidate, job),
           );
           sendJson(response, 200, {
             schemaVersion: 1,
@@ -2869,6 +3192,192 @@ export function createChatHandler(options: ChatGatewayOptions): RequestListener 
               ),
             );
           }
+        }
+        return;
+      }
+
+      if (url.pathname === "/api/schedule-results") {
+        if (request.method !== "GET") {
+          sendJson(
+            response,
+            405,
+            {
+              error: {
+                code: "INVALID_REQUEST",
+                message: "Read schedule results with GET.",
+              },
+            },
+            { Allow: "GET" },
+          );
+          return;
+        }
+        // The page polls this so a task that ran on a schedule can have its
+        // answer read back into the conversation without the owner asking.
+        // n8n answers from the saved run rows — no agent, no model call — and
+        // deliberately without the answers themselves: this reports which task
+        // finished and when, and the agent reads out what it said. As with
+        // funding progress, every failure is a quiet "not available", because
+        // a chat page has to keep working while n8n restarts.
+        try {
+          const resultsUrl = new URL(
+            "/webhook/schedule-results",
+            options.upstreamUrl,
+          );
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 5_000);
+          let upstream: Response;
+          try {
+            upstream = await fetchImplementation(resultsUrl, {
+              signal: controller.signal,
+            });
+          } finally {
+            clearTimeout(timer);
+          }
+          if (!upstream.ok) {
+            sendJson(response, 200, { schemaVersion: 1, available: false });
+            return;
+          }
+          const body = (await upstream.json()) as Record<string, unknown>;
+          sendJson(response, 200, {
+            ...body,
+            schemaVersion: 1,
+            available: true,
+          });
+        } catch {
+          sendJson(response, 200, { schemaVersion: 1, available: false });
+        }
+        return;
+      }
+
+      // Connecting Gmail happens in n8n, because the Google client secret
+      // lives in its encrypted credential store and nothing can read it back
+      // out. The chat cannot do the connecting, but it can be the one address
+      // the learner and the agent both know, so neither has to be told where
+      // n8n is running.
+      if (url.pathname === "/api/gmail/connect") {
+        if (request.method !== "GET") {
+          sendJson(
+            response,
+            405,
+            {
+              error: {
+                code: "INVALID_REQUEST",
+                message: "Open the Gmail connection with GET.",
+              },
+            },
+            { Allow: "GET" },
+          );
+          return;
+        }
+        const target = new URL(
+          "/home/credentials",
+          options.n8nPublicUrl ?? DEFAULT_N8N_PUBLIC_URL,
+        );
+        response.writeHead(302, {
+          Location: target.toString(),
+          "Cache-Control": "no-store",
+        });
+        response.end();
+        return;
+      }
+
+      // Polled by the page while the learner is away in Google's window, so
+      // the conversation can carry on by itself the moment Gmail answers. It
+      // costs nothing: n8n reads the mailbox address and no message content.
+      // A chat page has to keep working when n8n is down or mid-restart, so
+      // every failure here is a quiet "not yet" rather than an error.
+      if (url.pathname === "/api/gmail/status") {
+        if (request.method !== "GET") {
+          sendJson(
+            response,
+            405,
+            {
+              error: {
+                code: "INVALID_REQUEST",
+                message: "Read the Gmail status with GET.",
+              },
+            },
+            { Allow: "GET" },
+          );
+          return;
+        }
+        try {
+          const statusUrl = new URL("/webhook/gmail-status", options.upstreamUrl);
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 5_000);
+          let upstream: Response;
+          try {
+            upstream = await fetchImplementation(statusUrl, {
+              signal: controller.signal,
+            });
+          } finally {
+            clearTimeout(timer);
+          }
+          if (!upstream.ok) {
+            sendJson(response, 200, { schemaVersion: 1, connected: false });
+            return;
+          }
+          const body = (await upstream.json()) as Record<string, unknown>;
+          sendJson(response, 200, {
+            schemaVersion: 1,
+            connected: body.connected === true,
+            emailAddress:
+              typeof body.emailAddress === "string" ? body.emailAddress : "",
+          });
+        } catch {
+          sendJson(response, 200, { schemaVersion: 1, connected: false });
+        }
+        return;
+      }
+
+      if (url.pathname === "/api/funding-progress") {
+        if (request.method !== "GET") {
+          sendJson(
+            response,
+            405,
+            {
+              error: {
+                code: "INVALID_REQUEST",
+                message: "Read funding progress with GET.",
+              },
+            },
+            { Allow: "GET" },
+          );
+          return;
+        }
+        // The page polls this while a funding search runs, to draw its
+        // progress bar. n8n answers it from the search's own progress notes —
+        // no agent, no model call — so the poll costs nothing. A chat page has
+        // to keep working when n8n is down or mid-restart, which is why every
+        // failure here is a quiet "not available" rather than an error the
+        // user has to read.
+        try {
+          const progressUrl = new URL(
+            "/webhook/funding-progress",
+            options.upstreamUrl,
+          );
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 5_000);
+          let upstream: Response;
+          try {
+            upstream = await fetchImplementation(progressUrl, {
+              signal: controller.signal,
+            });
+          } finally {
+            clearTimeout(timer);
+          }
+          if (!upstream.ok) {
+            sendJson(response, 200, { schemaVersion: 1, available: false });
+            return;
+          }
+          const body = (await upstream.json()) as Record<string, unknown>;
+          sendJson(response, 200, {
+            ...body,
+            schemaVersion: 1,
+            available: true,
+          });
+        } catch {
+          sendJson(response, 200, { schemaVersion: 1, available: false });
         }
         return;
       }

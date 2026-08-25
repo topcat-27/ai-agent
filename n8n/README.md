@@ -4,7 +4,7 @@ This directory contains portable workflow exports for the local AI agent.
 
 | File | Purpose |
 | --- | --- |
-| `workflows/00-start-here-project-partner.json` | Validates chat requests, calls Claude, keeps session memory, and returns the chat contract |
+| `workflows/00-start-here-project-partner.json` | Validates chat requests, selects one agent-scoped prompt and tool graph, calls Claude, and returns the chat contract |
 | `workflows/01-start-here-learner-checklist.json` | Gives learners a five-step visual path from local owner setup to a customised, diagnosed agent |
 | `workflows/10-setup-local-task-data.json` | Idempotently creates task, audit, and pending-confirmation tables plus three sample tasks |
 | `workflows/11-setup-sync-enabled-skills.json` | Validates and stores the enabled Markdown skill bundle through a temporary local endpoint |
@@ -14,12 +14,32 @@ This directory contains portable workflow exports for the local AI agent.
 | `workflows/30-tool-propose-create-task.json` | Model-facing create proposal with no task-table mutation |
 | `workflows/31-tool-propose-update-task-status.json` | Model-facing status proposal with no task-table mutation |
 | `workflows/40-confirm-task-write.json` | Enforces exact session binding, expiry, supersession, and single-use before a write |
-| `workflows/50-tool-start-domain-research.json` | Starts authorised public-domain research and binds its job ID to the current conversation |
-| `workflows/51-tool-complete-domain-research.json` | Reports what one conversation-bound research job saved, without researching again |
-| `workflows/52-tool-get-business-memory.json` | Reads saved company, competitor, keyword, source, and warning data from local memory |
 | `workflows/90-debug-agent-health.json` | Exposes a safe local health response without secrets |
 
-The workflow exports contain a credential reference named `Anthropic account`, but no API keys. After import, create or select the real credential inside n8n. Workflows `00` and `50` each need it selected once.
+The workflow exports contain a credential reference named `Anthropic account`,
+but no secret. After import, create or select the real credential inside n8n.
+Optional skills document any additional provider credentials they require.
+
+## Skill folders
+
+`folders.manifest.json` decides how the workflows are grouped in n8n. The
+eleven base workflows plus any installed optional workflows read as unrelated
+things without grouping, so import files them into capability folders and the
+launcher prints the link to the page that shows them.
+
+That page is the local owner's **Personal** project. n8n only draws folders inside a project; its **Overview** page is always a flat list of everything and cannot be grouped. Nothing about the agent depends on the folders — they change the list, not the wiring — so a learner who ignores them still has a working agent.
+
+**Folders are a licensed n8n feature.** An unregistered instance has no folder licence, and on one the grouping is worse than useless: the folders are never drawn, but the project page still asks for "workflows at the top level", so a filed workflow disappears from the list instead of being grouped. Import therefore checks for a licence and leaves the workflows ungrouped without one, which is simply the flat list a learner has today. Registering the free community edition inside n8n unlocks folders; it sends an email address to n8n and returns a licence key.
+
+Adding a workflow means adding it to `folders.manifest.json` as well. `scripts/validate-workflows.mjs` fails while a workflow belongs to no folder or to two. Re-file an existing install, or put everything back at the top level, at any time:
+
+```bash
+node scripts/local.mjs group-workflows
+```
+
+```bash
+node scripts/local.mjs group-workflows --undo
+```
 
 Use the repository import script rather than editing JSON by hand:
 

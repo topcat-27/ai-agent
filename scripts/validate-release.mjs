@@ -33,6 +33,8 @@ for (const file of [
   "docs/GETTING_STARTED.md",
   "docs/COURSE_GUIDE.md",
   "docs/RELEASE.md",
+  "docs/FEATURE_SLICES.md",
+  "docs/UPGRADING_TO_0.3.md",
   "docs/FEEDBACK_AND_CHANGE_CONTROL.md",
   "prepare-instructor-pack.command",
   "prepare-instructor-pack-windows.cmd",
@@ -40,6 +42,8 @@ for (const file of [
   "export-workflows-windows.cmd",
   "restore-windows.cmd",
   "scripts/prepare-instructor-pack.sh",
+  "scripts/upgrade-check.mjs",
+  "scripts/test-upgrade-check.mjs",
   "scripts/windows/prepare-instructor-pack.ps1",
   ".github/ISSUE_TEMPLATE/learner-feedback.yml",
   ".github/ISSUE_TEMPLATE/improvement.yml",
@@ -97,6 +101,11 @@ const rootPackageLock = JSON.parse(
 check(
   rootPackageJson.version === version,
   "Root package version must match VERSION",
+);
+check(
+  rootPackageLock.version === version &&
+    rootPackageLock.packages?.[""]?.version === version,
+  "Root lockfile version must match VERSION",
 );
 check(
   /^\d+\.\d+\.\d+$/.test(rootPackageJson.dependencies?.n8n ?? ""),
@@ -176,12 +185,31 @@ check(
   ".gitignore must exclude generated instructor packs",
 );
 
+// The base agent ships exactly these. Optional skills add their own workflows
+// on the learner's machine, so this asserts the base is intact rather than
+// pinning a total that every new skill would have to come back and edit.
+const baseWorkflows = [
+  "00-start-here-project-partner.json",
+  "01-start-here-learner-checklist.json",
+  "10-setup-local-task-data.json",
+  "11-setup-sync-enabled-skills.json",
+  "20-tool-list-tasks.json",
+  "21-tool-create-task.json",
+  "22-tool-update-task-status.json",
+  "30-tool-propose-create-task.json",
+  "31-tool-propose-update-task-status.json",
+  "40-confirm-task-write.json",
+  "90-debug-agent-health.json",
+];
 const workflows = (
   await readdir(join(projectRoot, "n8n/workflows"), { withFileTypes: true })
 ).filter((entry) => entry.isFile() && entry.name.endsWith(".json"));
-// 11 course workflows, the two local Asana workflows (50, 51), and the three
-// domain-research workflows (50, 51, 52).
-check(workflows.length === 16, `Release must contain 16 workflows, found ${workflows.length}`);
+const workflowNames = workflows.map((entry) => entry.name);
+const missingBase = baseWorkflows.filter((name) => !workflowNames.includes(name));
+check(
+  missingBase.length === 0,
+  `Release must contain the ${baseWorkflows.length} base workflows, missing ${missingBase.join(", ")}`,
+);
 
 if (failures.length > 0) {
   for (const failure of failures) {
