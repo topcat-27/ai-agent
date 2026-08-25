@@ -9,3 +9,4 @@ asana-capture
 lead-conversion
 seo-article-writer
 linkedin-profile-lookup
+linkedin-prospect-search

@@ -84,6 +84,14 @@
       "workflowId": "phase12LookupLinkedInProfile"
     },
     {
+      "id": "search_linkedin_prospects",
+      "risk": "paid_external_read",
+      "available": true,
+      "modelCallable": true,
+      "mode": "explicit_per_search_credit_approval",
+      "workflowId": "phase12SearchLinkedInProspects"
+    },
+    {
       "id": "delete_task",
       "risk": "destructive",
       "available": false,
