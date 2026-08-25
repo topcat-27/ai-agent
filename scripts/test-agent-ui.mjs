@@ -26,7 +26,20 @@ assert.match(html, /What do you want to call this workspace\?/);
 assert.match(html, /placeholder="What should your agent do\?"/);
 assert.doesNotMatch(html, /\sstyle=/);
 
-assert.doesNotMatch(source, /\.innerHTML\s*=/);
+// innerHTML stays banned everywhere except the single audited call that renders
+// agent markdown, which is fed by markdownToHtml. That renderer escapes its input
+// before applying any markup, so the escaped-first contract below is what makes the
+// exception safe: if the escaping is ever removed, this test fails.
+for (const assignment of source.match(/[A-Za-z_$][\w$]*\.innerHTML\s*=\s*[^;]+/g) ?? []) {
+  assert.match(
+    assignment,
+    /\.innerHTML\s*=\s*markdownToHtml\(/,
+    `unaudited innerHTML assignment: ${assignment.slice(0, 80)}`,
+  );
+}
+assert.match(source, /function markdownToHtml\(/);
+assert.match(source, /function renderInline\(text\)\s*\{\s*let out = escapeHtml\(text\);/);
+assert.match(source, /function escapeHtml\(value\)/);
 assert.doesNotMatch(
   source,
   /className = "agent-(?:row|settings|button)"|aria-pressed/,

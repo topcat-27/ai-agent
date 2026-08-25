@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadSkillPacks } from "./skill-packages.mjs";
@@ -28,14 +28,36 @@ assert.deepEqual(byAgent.marketing, ["domain-research", "seo-aeo-article-writer"
 assert.deepEqual(byAgent.investment, ["funding-and-investor-updates"]);
 assert.deepEqual(byAgent.bookkeeping, ["xero-bookkeeping"]);
 
+// Optional modules are fetched on demand, so optional-skills/<id> exists only
+// once that module has been installed here. An absent folder therefore means
+// "this learner has not installed that package", not a broken package contract.
+// The reverse is what must always hold, and is what this checks: anything
+// actually installed has to have its source folder present. Base modules ship
+// with the project, so those are still required unconditionally.
+const enabledIds = new Set(
+  (await readFile(join("skills", "enabled.txt"), "utf8").catch(() => ""))
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#")),
+);
+const isInstalled = async (id) => {
+  if (enabledIds.has(id)) return true;
+  try {
+    await access(join("skills", id));
+    return true;
+  } catch {
+    return false;
+  }
+};
 for (const pack of packs) {
   for (const module of pack.modules) {
-    if (module.source === "optional" && !optionalCataloguePresent) continue;
-    const directory =
-      module.source === "base"
-        ? join("skills", module.id)
-        : join("optional-skills", module.id);
-    await access(directory);
+    if (module.source === "base") {
+      await access(join("skills", module.id));
+      continue;
+    }
+    if (!optionalCataloguePresent) continue;
+    if (!(await isInstalled(module.id))) continue;
+    await access(join("optional-skills", module.id));
   }
 }
 
