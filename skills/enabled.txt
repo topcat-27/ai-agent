@@ -7,3 +7,4 @@ domain-research
 telegram-trigger
 asana-capture
 lead-conversion
+seo-article-writer
