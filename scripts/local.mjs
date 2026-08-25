@@ -57,7 +57,10 @@ const runtimeRoot = resolve(
 const npmInstallTimeoutMs = 30 * 60 * 1_000;
 const npmCommandTimeoutMs = 10 * 60 * 1_000;
 const n8nCliTimeoutMs = 5 * 60 * 1_000;
-const chatDatabaseSchemaVersion = 5;
+// Must match SCHEMA_VERSION in apps/chat/src/chat-store.ts. v0.3.0 shipped
+// the chat store at 6 but left this at 5, so diagnose reported a healthy
+// database as failed. Re-check this line after any instructor upgrade.
+const chatDatabaseSchemaVersion = 6;
 
 const paths = {
   envFile: join(projectRoot, ".env"),
