@@ -2705,6 +2705,9 @@
   const DELIVERED_REMEMBERED = 60;
   let scanPollTimer = null;
   let resultsPollTimer = null;
+  // Set once the backend reports no scheduled-task workflow, so switching
+  // agents does not start the poll up again for a feature that is not there.
+  let scheduleResultsUnavailable = false;
   let scanWasRunning = false;
   let scanDoneUntil = 0;
   let deliveringScan = false;
@@ -2817,9 +2820,22 @@
     } catch {
       return;
     }
-    if (!payload || payload.available === false || !Array.isArray(payload.runs)) {
+    // `available: false` means no scheduled-task workflow is installed, which
+    // does not change while the page is open. Polling on regardless asked n8n
+    // for a webhook it does not have every twelve seconds and filled the deploy
+    // log with "unknown webhook" for a feature the learner never switched on.
+    // The poll stops instead, and the visibility handler still calls this
+    // directly, so installing the skill and returning to the tab picks it up.
+    if (payload && payload.available === false) {
+      scheduleResultsUnavailable = true;
+      stopScheduleResultsPoll();
       return;
     }
+    if (!payload || !Array.isArray(payload.runs)) {
+      return;
+    }
+    scheduleResultsUnavailable = false;
+    startScheduleResultsPoll();
     for (const run of payload.runs) {
       if (String(run.agentId ?? "") !== activeAgentId) {
         continue;
@@ -2991,15 +3007,28 @@
     }
   }
 
+  function startScheduleResultsPoll() {
+    if (scheduleResultsUnavailable || resultsPollTimer !== null) {
+      return;
+    }
+    resultsPollTimer = window.setInterval(() => {
+      void refreshScheduleResults();
+    }, SCAN_POLL_MS);
+  }
+
+  function stopScheduleResultsPoll() {
+    if (resultsPollTimer === null) {
+      return;
+    }
+    window.clearInterval(resultsPollTimer);
+    resultsPollTimer = null;
+  }
+
   function syncScanProgress() {
     // Scheduled work belongs to every agent, not just this one, so its poll
     // runs whoever is on screen. The funding progress bar is Investment's
     // alone and starts and stops with it.
-    if (resultsPollTimer === null) {
-      resultsPollTimer = window.setInterval(() => {
-        void refreshScheduleResults();
-      }, SCAN_POLL_MS);
-    }
+    startScheduleResultsPoll();
     void refreshScheduleResults();
 
     if (activeAgentId === FUNDING_AGENT_ID) {
