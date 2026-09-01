@@ -67,6 +67,13 @@ const skillsDirectory =
 const skillPacksDirectory =
   process.env.SKILL_PACKS_DIRECTORY ??
   fileURLToPath(new URL("../../../skill-packs", import.meta.url));
+// The replacement for the retired website-capture experiment is a
+// user-mediated Xero report export. It still rolls out behind an explicit flag
+// so public deployments cannot accidentally expose half-configured controls.
+const xeroCaptureEnabled =
+  process.env.XERO_CAPTURE_RUNS_ENABLED?.trim().toLowerCase() === "true";
+const xeroCaptureControlSecret =
+  process.env.XERO_CAPTURE_CONTROL_SECRET ?? "";
 
 try {
   new URL(upstreamUrl);
@@ -137,6 +144,8 @@ const server = createChatServer({
   n8nPublicUrl,
   asanaLookupsUrl,
   asanaCreateUrl,
+  xeroCaptureEnabled,
+  xeroCaptureControlSecret,
   timeoutMs,
   logError: (message, error) => console.error(message, error),
 });

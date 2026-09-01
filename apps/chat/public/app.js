@@ -173,6 +173,8 @@
     grant: "M12 3 4 7v5c0 4.6 3.3 8.3 8 9 4.7-.7 8-4.4 8-9V7l-8-4Zm-2.6 8.6 2 2 3.8-4",
     calendar: "M5 6h14v14H5V6Zm0 4h14M9 3v4m6-4v4m-4 8h4",
     ledger: "M5 4h11l3 3v13H5V4Zm3 5h6M8 13h8M8 17h5",
+    // A month of email, and the one written thing that comes out of it.
+    mailUpdate: "M3 5h18v11H3V5Zm0 0 9 6.5L21 5M7 20h10",
   };
   const SKILL_ICON_BY_ID = {
     "meeting-to-actions": "checklist",
@@ -188,7 +190,7 @@
     "seo-aeo-article-writer": "article",
     "funding-radar": "grant",
     "funding-and-investor-updates": "grant",
-    "monthly-update": "calendar",
+    "monthly-update": "mailUpdate",
     "xero-coding-review": "ledger",
   };
   const STORAGE_KEY = "ai-solopreneur-chat-session";
@@ -265,12 +267,18 @@
     suggestionList: document.querySelector("#suggestion-list"),
     suggestions: document.querySelector("#suggestions"),
     uploadButton: document.querySelector("#upload-button"),
+    xeroCaptureGuidance: document.querySelector("#xero-capture-guidance"),
+    xeroCaptureLaunch: document.querySelector("#xero-capture-launch"),
+    xeroCaptureStart: document.querySelector("#xero-capture-start"),
   };
 
   let sessionId = loadOrCreateSession();
   let requestInProgress = false;
   let documentRequestInProgress = false;
   let switchingConversation = false;
+  let conversationSwitchDepth = 0;
+  let conversationLoadGeneration = 0;
+  let activeConversationLoadSwitchGeneration = 0;
   let loadingMessage = null;
   let agents = DEFAULT_AGENTS;
   let activeAgentId = "project-manager";
@@ -289,6 +297,23 @@
   let agentSettings = null;
   let agentDialogAgentId = "";
   let agentDialogReturnFocus = null;
+  let xeroCaptureEnabled = false;
+  let xeroCaptureAvailable = false;
+  let xeroCapturePollTimer = null;
+  let xeroCaptureCard = null;
+  let activeXeroCaptureSessionId = "";
+  let activeXeroCaptureRunId = "";
+  let activeXeroReviewRunId = "";
+  let activeXeroCaptureState = "";
+  let activeXeroCaptureUpdatedAtMs = 0;
+  let xeroCaptureStatusInFlight = false;
+  let xeroCaptureStatusRefreshPending = false;
+  let xeroCaptureStartInFlight = false;
+  let xeroCapturePollFailures = 0;
+  let xeroSuggestionDeliveryTimer = null;
+  let xeroSuggestionDeliveryTimerId = "";
+  let xeroSuggestionDeliveryInFlight = false;
+  const xeroSuggestionsDeliveredThisPage = new Set();
   const narrowLayout = window.matchMedia("(max-width: 50rem)");
 
   function cleanText(value, fallback, maximumLength) {
@@ -426,8 +451,9 @@
     elements.mobileAgentInitials.textContent = getInitials(name);
     applySavedAvatar();
     // Every path that changes the active agent comes through here, so this is
-    // the one place the funding progress poll starts and stops.
+    // the one place the agent-specific progress polls start and stop.
     syncScanProgress();
+    syncXeroCaptureProgress();
   }
 
   function applySavedAvatar() {
@@ -574,8 +600,9 @@
     }, 2_500);
   }
 
-  // Agent replies are plain text. Two local paths, and only these two, become
-  // links: an article download, and the Gmail connect route. Nothing else is
+  // Agent replies are plain text. Only these local paths become links: an
+  // article download, provider connection routes, and the fixed Xero capture
+  // hand-off marker. Nothing else is
   // linkified — an agent that reads a stranger's email must never be able to
   // turn a URL from that email into something clickable.
   const SAFE_LINKS = [
@@ -603,6 +630,51 @@
         gmailConnectOffered = true;
         startGmailConnectionWatch();
         return link;
+      },
+    },
+    {
+      pattern: /(?:http:\/\/localhost:\d{2,5})?\/api\/xero\/connect\b/g,
+      build() {
+        const link = document.createElement("a");
+        link.className = "message__connect";
+        link.href = "/api/xero/connect";
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = "Open Xero credentials";
+        return link;
+      },
+    },
+    {
+      pattern: /(?:http:\/\/localhost:\d{2,5})?\/api\/xero-capture\/runs\b/g,
+      build() {
+        const button = document.createElement("button");
+        button.className = "message__connect message__xero-capture";
+        button.type = "button";
+        button.textContent = "Export Xero queue (read-only)";
+        button.disabled = !xeroCaptureEnabled || !xeroCaptureAvailable;
+        button.addEventListener("click", () => {
+          void startXeroCapture("agent");
+        });
+        return button;
+      },
+    },
+    {
+      // The backend accepts this only when the same browser conversation has
+      // a matching, unexpired pending action. Rendering it as a button makes
+      // the attested user step one click without letting the model call the
+      // confirmed worker directly.
+      pattern: /\bCONFIRM [A-F0-9]{8}\b/g,
+      build(confirmationText) {
+        const button = document.createElement("button");
+        button.className = "message__connect message__confirm-action";
+        button.type = "button";
+        button.textContent = "Confirm this action";
+        button.setAttribute("aria-label", `Send ${confirmationText}`);
+        button.addEventListener("click", () => {
+          button.disabled = true;
+          void sendMessage(confirmationText, true);
+        }, { once: true });
+        return button;
       },
     },
   ];
@@ -1944,40 +2016,106 @@
     }
   }
 
+  function syncConversationSwitchState() {
+    switchingConversation =
+      conversationSwitchDepth > 0 ||
+      activeConversationLoadSwitchGeneration > 0;
+  }
+
+  function beginConversationSwitch() {
+    conversationSwitchDepth += 1;
+    syncConversationSwitchState();
+  }
+
+  function endConversationSwitch() {
+    conversationSwitchDepth = Math.max(0, conversationSwitchDepth - 1);
+    syncConversationSwitchState();
+  }
+
+  function clearXeroCaptureForConversationSwitch() {
+    // Do this before the saved conversation request starts. Otherwise a ready
+    // timer from the conversation being left can fire while the new one is in
+    // flight and manufacture a user turn in the wrong chat.
+    stopXeroCapturePolling();
+    xeroCaptureStatusRefreshPending = false;
+    xeroCaptureAvailable = false;
+    syncXeroCaptureButtons();
+    hideXeroCaptureProgress();
+  }
+
   async function loadConversation(id, targetMessageId, allowBusy = false) {
     if (!allowBusy && (requestInProgress || documentRequestInProgress)) {
       return;
     }
-    const response = await fetch(
-      `/api/conversations/${encodeURIComponent(id)}?limit=100`,
-      { headers: { Accept: "application/json" } },
-    );
-    const body = await parseResponse(response, "That saved chat could not be loaded.");
+    if (allowBusy && switchingConversation && id === sessionId) {
+      return;
+    }
     const previousSessionId = sessionId;
-    if (previousSessionId !== id && sessionDocuments.length > 0) {
-      discardPendingDocuments(previousSessionId);
+    const switchingToDifferentConversation = previousSessionId !== id;
+    const loadGeneration = ++conversationLoadGeneration;
+    if (switchingToDifferentConversation) {
+      activeConversationLoadSwitchGeneration = loadGeneration;
+      syncConversationSwitchState();
+      clearXeroCaptureForConversationSwitch();
+    } else if (activeConversationLoadSwitchGeneration > 0) {
+      // A deliberate click back to the current conversation supersedes an
+      // older history request just as surely as a click to a third chat does.
+      activeConversationLoadSwitchGeneration = 0;
+      syncConversationSwitchState();
     }
-    sessionId = body.conversation.id;
-    storeSession(sessionId);
-    activeConversationTitle = body.conversation.title;
-    const availableAgent = agents.find(
-      (agent) => agent.id === body.conversation.agentId && agent.status === "active",
-    );
-    if (availableAgent) {
-      activeAgentId = availableAgent.id;
+    try {
+      const response = await fetch(
+        `/api/conversations/${encodeURIComponent(id)}?limit=100`,
+        { headers: { Accept: "application/json" } },
+      );
+      const body = await parseResponse(
+        response,
+        "That saved chat could not be loaded.",
+      );
+      // A second history click can overtake the first request. Only the most
+      // recent load may replace the active conversation or its capture state.
+      if (loadGeneration !== conversationLoadGeneration) {
+        return;
+      }
+      if (previousSessionId !== id && sessionDocuments.length > 0) {
+        discardPendingDocuments(previousSessionId);
+      }
+      sessionId = body.conversation.id;
+      storeSession(sessionId);
+      activeConversationTitle = body.conversation.title;
+      const availableAgent = agents.find(
+        (agent) =>
+          agent.id === body.conversation.agentId && agent.status === "active",
+      );
+      if (availableAgent) {
+        activeAgentId = availableAgent.id;
+      }
+      currentMessages = Array.isArray(body.messages) ? body.messages : [];
+      nextMessageBefore = body.nextBefore ?? null;
+      elements.input.value = "";
+      updateCharacterCount();
+      resizeInput();
+      applyAgentIdentity();
+      renderAgentList();
+      renderSuggestions();
+      renderStoredConversation(targetMessageId);
+      renderHistoryList();
+      setHistoryOpen(false);
+      elements.input.focus();
+    } finally {
+      if (
+        switchingToDifferentConversation &&
+        activeConversationLoadSwitchGeneration === loadGeneration
+      ) {
+        activeConversationLoadSwitchGeneration = 0;
+        syncConversationSwitchState();
+        // A failed load leaves the original conversation active. Restore its
+        // status after clearing the old timer rather than leaving the card gone.
+        if (sessionId === previousSessionId) {
+          syncXeroCaptureProgress();
+        }
+      }
     }
-    currentMessages = Array.isArray(body.messages) ? body.messages : [];
-    nextMessageBefore = body.nextBefore ?? null;
-    elements.input.value = "";
-    updateCharacterCount();
-    resizeInput();
-    applyAgentIdentity();
-    renderAgentList();
-    renderSuggestions();
-    renderStoredConversation(targetMessageId);
-    renderHistoryList();
-    setHistoryOpen(false);
-    elements.input.focus();
   }
 
   async function loadOlderMessages() {
@@ -2008,7 +2146,8 @@
     // being left. A background delivery that sent into that gap was rejected
     // with "Conversation belongs to a different agent" — right of the server,
     // and a result nobody would have seen.
-    switchingConversation = true;
+    beginConversationSwitch();
+    clearXeroCaptureForConversationSwitch();
     try {
       const response = await fetch("/api/conversations", {
         method: "POST",
@@ -2020,7 +2159,10 @@
       await loadConversation(body.conversation.id);
       elements.requestStatus.textContent = "New conversation started";
     } finally {
-      switchingConversation = false;
+      endConversationSwitch();
+      if (sessionId === previousSessionId) {
+        syncXeroCaptureProgress();
+      }
     }
   }
 
@@ -2429,6 +2571,7 @@
       ? `${displayAgentName()} is working on your request…`
       : "Press Enter to send · Shift + Enter for a new line";
     elements.agentDialogChat.disabled = controlsBusy;
+    syncXeroCaptureButtons();
     renderDocuments();
   }
 
@@ -2564,9 +2707,8 @@
     }
   }
 
-  // Returns whether the turn landed. Callers that a person drives ignore it;
-  // the automatic funding read-out uses it to tell a delivered result from a
-  // send that never arrived.
+  // Returns whether the visible reply landed. Person-driven callers ignore it;
+  // automatic result mechanisms apply their own bounded delivery policy.
   async function sendMessage(
     rawMessage,
     showUserMessage,
@@ -2665,12 +2807,630 @@
       // rather than making the new bar wait for the next scheduled poll.
       if (activeAgentId === FUNDING_AGENT_ID) {
         void refreshScanProgress();
+        void refreshMonthlyUpdateProgress();
       }
       if (activeAgentId === "marketing") {
         void refreshArticlePanel();
       }
     }
     return delivered;
+  }
+
+  // ---- User-mediated Xero queue export ---------------------------------
+  // Xero does not expose the live reconciliation queue through its public
+  // API. The supported hosted flow therefore asks the owner to run Xero's
+  // official Uncoded Statement Lines report and export its CSV. The app only
+  // tracks that import job. It never drives Xero, reads the page, or receives
+  // a Xero credential.
+  const BOOKKEEPING_AGENT_ID = "bookkeeping";
+  const XERO_CAPTURE_POLL_MS = 4_000;
+  const XERO_SUGGESTION_DELIVER_WITHIN_MS = 12 * 60 * 60 * 1000;
+  const XERO_SUGGESTION_BUSY_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000];
+  const XERO_CAPTURE_TERMINAL_STATES = new Set([
+    "ready",
+    "failed",
+    "cancelled",
+  ]);
+  const XERO_UNCODED_REPORT_URL =
+    "https://go.xero.com/Banking/StatementLines/Offline";
+  const XERO_CAPTURE_RESULT_PROMPT =
+    "Show me this Xero reconciliation review. Use filter: all. Give me the complete lane counts and a concise overview, then paginated details starting with items that need my decision, high-confidence items ready to prepare, and existing matches. Continue with nextCursor while this bounded turn allows. If rows remain, state the exact remaining count and next cursor; never claim every detail was shown.";
+
+  function xeroCaptureResultPrompt(reviewRunId = "") {
+    const exactReviewRunId = String(reviewRunId).trim();
+    return exactReviewRunId
+      ? `${XERO_CAPTURE_RESULT_PROMPT} Read exactly reviewRunId ${exactReviewRunId}; pass it as runId to get_reconciliation_suggestions and do not substitute another review.`
+      : XERO_CAPTURE_RESULT_PROMPT;
+  }
+  const XERO_CAPTURE_STATE = {
+    preflight: {
+      note: "Preparing the read-only export run…",
+      percent: 5,
+    },
+    opening: {
+      note: "Xero is open. Sign in if it asks you to.",
+      percent: 12,
+    },
+    awaiting_login: {
+      note: "Sign in to Xero in the opened tab. This page will keep waiting.",
+      percent: 18,
+    },
+    awaiting_export: {
+      note:
+        "In Xero, choose All bank accounts and a date range covering your unreconciled history, click Run, then Export → CSV. Leave the download in Downloads.",
+      percent: 28,
+    },
+    discovering: {
+      note: "The local companion found the exported CSV…",
+      percent: 38,
+    },
+    capturing: {
+      note: "Reading the exported statement lines locally…",
+      percent: 56,
+    },
+    verifying: {
+      note: "Checking the exported rows and totals…",
+      percent: 70,
+    },
+    uploading: {
+      note: "Sending the verified export to your private bookkeeping workflow…",
+      percent: 82,
+    },
+    reviewing: {
+      note: "Preparing read-only coding suggestions…",
+      percent: 92,
+    },
+    ready: {
+      note: "Your Xero coding suggestions are ready.",
+      percent: 100,
+    },
+    failed: {
+      note: "The Xero export could not be processed. Start a fresh export to retry.",
+      percent: 100,
+    },
+    cancelled: {
+      note: "The Xero export run was cancelled. Nothing changed in Xero.",
+      percent: 100,
+    },
+  };
+
+  function syncXeroCaptureButtons() {
+    const enabled =
+      activeAgentId === BOOKKEEPING_AGENT_ID &&
+      xeroCaptureEnabled &&
+      xeroCaptureAvailable;
+    elements.xeroCaptureLaunch.hidden = !(
+      activeAgentId === BOOKKEEPING_AGENT_ID && xeroCaptureEnabled
+    );
+    elements.xeroCaptureStart.disabled =
+      !enabled || requestInProgress || xeroCaptureStartInFlight;
+    for (const button of document.querySelectorAll(".message__xero-capture")) {
+      button.disabled =
+        !enabled || requestInProgress || xeroCaptureStartInFlight;
+    }
+  }
+
+  function xeroCaptureProgressCard() {
+    if (xeroCaptureCard) {
+      return xeroCaptureCard;
+    }
+    const card = document.createElement("div");
+    card.className = "scan-progress";
+    card.id = "xero-capture-progress";
+    card.setAttribute("role", "status");
+    card.setAttribute("aria-live", "polite");
+    card.hidden = true;
+
+    const spinner = document.createElement("div");
+    spinner.className = "scan-progress__spinner";
+    spinner.setAttribute("aria-hidden", "true");
+
+    const body = document.createElement("div");
+    body.className = "scan-progress__body";
+    const note = document.createElement("p");
+    note.className = "scan-progress__note";
+    const track = document.createElement("div");
+    track.className = "scan-progress__track";
+    track.setAttribute("aria-hidden", "true");
+    const fill = document.createElement("div");
+    fill.className = "scan-progress__fill";
+    track.append(fill);
+    body.append(note, track);
+
+    const side = document.createElement("div");
+    side.className = "xero-capture-progress__side";
+    const meta = document.createElement("p");
+    meta.className = "scan-progress__meta";
+    const actions = document.createElement("div");
+    actions.className = "xero-capture-progress__actions";
+    const open = document.createElement("a");
+    open.className = "xero-capture-progress__action";
+    open.href = XERO_UNCODED_REPORT_URL;
+    open.target = "_blank";
+    open.rel = "noopener noreferrer";
+    open.textContent = "Open Xero report";
+    const cancel = document.createElement("button");
+    cancel.className = "xero-capture-progress__action";
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", () => {
+      void cancelXeroCapture();
+    });
+    const show = document.createElement("button");
+    show.className = "xero-capture-progress__action";
+    show.type = "button";
+    show.textContent = "Show suggestions";
+    show.hidden = true;
+    show.addEventListener("click", () => {
+      void sendMessage(xeroCaptureResultPrompt(activeXeroReviewRunId), true);
+    });
+    actions.append(open, cancel, show);
+    side.append(meta, actions);
+    card.append(spinner, body, side);
+    xeroCaptureCard = { card, note, fill, meta, actions, open, cancel, show };
+    return xeroCaptureCard;
+  }
+
+  function hideXeroCaptureProgress() {
+    stopXeroSuggestionDelivery();
+    if (xeroCaptureCard) {
+      xeroCaptureCard.card.hidden = true;
+      xeroCaptureCard.card.remove();
+    }
+    activeXeroCaptureSessionId = "";
+    activeXeroCaptureRunId = "";
+    activeXeroReviewRunId = "";
+    activeXeroCaptureState = "";
+    activeXeroCaptureUpdatedAtMs = 0;
+  }
+
+  function stopXeroCapturePolling() {
+    if (xeroCapturePollTimer !== null) {
+      window.clearTimeout(xeroCapturePollTimer);
+      xeroCapturePollTimer = null;
+    }
+  }
+
+  function stopXeroSuggestionDelivery() {
+    if (xeroSuggestionDeliveryTimer !== null) {
+      window.clearTimeout(xeroSuggestionDeliveryTimer);
+      xeroSuggestionDeliveryTimer = null;
+    }
+    xeroSuggestionDeliveryTimerId = "";
+  }
+
+  function xeroSuggestionDeliveryId(binding) {
+    return `xero-review:${binding.sessionId}:${binding.captureRunId}:${binding.reviewRunId}`;
+  }
+
+  function xeroSuggestionTimestampIsFresh(timestampMs) {
+    const ageMs = Date.now() - Number(timestampMs);
+    return (
+      Number.isFinite(ageMs) &&
+      ageMs >= -5 * 60 * 1000 &&
+      ageMs <= XERO_SUGGESTION_DELIVER_WITHIN_MS
+    );
+  }
+
+  function xeroSuggestionBindingIsCurrent(binding) {
+    return (
+      activeAgentId === BOOKKEEPING_AGENT_ID &&
+      sessionId === binding.sessionId &&
+      activeXeroCaptureSessionId === binding.sessionId &&
+      activeXeroCaptureRunId === binding.captureRunId &&
+      activeXeroReviewRunId === binding.reviewRunId &&
+      activeXeroCaptureState === "ready" &&
+      xeroSuggestionTimestampIsFresh(binding.resultUpdatedAtMs)
+    );
+  }
+
+  // A completed review is the result of the user's original request, not a
+  // second task they should have to discover and ask for. Deliver it through
+  // the agent once, retaining the visible button as an explicit retry.
+  function scheduleXeroSuggestionDelivery(
+    binding,
+    delay = 0,
+    busyAttempt = 0,
+  ) {
+    if (
+      !binding ||
+      !binding.sessionId ||
+      !binding.captureRunId ||
+      !binding.reviewRunId ||
+      !xeroSuggestionBindingIsCurrent(binding)
+    ) {
+      return;
+    }
+    const deliveryId = xeroSuggestionDeliveryId(binding);
+    if (xeroSuggestionDeliveryTimer !== null) {
+      if (xeroSuggestionDeliveryTimerId === deliveryId) {
+        return;
+      }
+      stopXeroSuggestionDelivery();
+    }
+    if (
+      xeroSuggestionsDeliveredThisPage.has(deliveryId) ||
+      alreadyDelivered(deliveryId)
+    ) {
+      return;
+    }
+    xeroSuggestionDeliveryTimerId = deliveryId;
+    xeroSuggestionDeliveryTimer = window.setTimeout(() => {
+      xeroSuggestionDeliveryTimer = null;
+      xeroSuggestionDeliveryTimerId = "";
+      void deliverXeroSuggestions(binding, busyAttempt);
+    }, delay);
+  }
+
+  async function deliverXeroSuggestions(binding, busyAttempt = 0) {
+    if (!xeroSuggestionBindingIsCurrent(binding)) {
+      return;
+    }
+    if (
+      xeroSuggestionDeliveryInFlight ||
+      switchingConversation ||
+      requestInProgress ||
+      documentRequestInProgress
+    ) {
+      const retryDelay = XERO_SUGGESTION_BUSY_RETRY_DELAYS_MS[busyAttempt];
+      if (retryDelay === undefined) {
+        // The result remains available through Show suggestions. Persistently
+        // suppress this automatic attempt so a busy tab cannot retry forever
+        // on every status render or reload.
+        const deliveryId = xeroSuggestionDeliveryId(binding);
+        xeroSuggestionsDeliveredThisPage.add(deliveryId);
+        markDelivered(deliveryId);
+        return;
+      }
+      scheduleXeroSuggestionDelivery(binding, retryDelay, busyAttempt + 1);
+      return;
+    }
+    const deliveryId = xeroSuggestionDeliveryId(binding);
+    if (
+      xeroSuggestionsDeliveredThisPage.has(deliveryId) ||
+      alreadyDelivered(deliveryId)
+    ) {
+      return;
+    }
+    xeroSuggestionDeliveryInFlight = true;
+    xeroSuggestionsDeliveredThisPage.add(deliveryId);
+    markDelivered(deliveryId);
+    try {
+      // Once /api/chat is attempted, its outcome may be ambiguous: the server
+      // can have committed the turn even if the response is lost. Never replay
+      // automatically with a fresh request ID. The visible Show suggestions
+      // button is the deliberate retry path.
+      await sendMessage(xeroCaptureResultPrompt(binding.reviewRunId), true);
+    } finally {
+      xeroSuggestionDeliveryInFlight = false;
+    }
+  }
+
+  function ensureXeroCapturePolling(delay = XERO_CAPTURE_POLL_MS) {
+    if (xeroCapturePollTimer === null) {
+      xeroCapturePollTimer = window.setTimeout(() => {
+        xeroCapturePollTimer = null;
+        void refreshXeroCaptureStatus();
+      }, delay);
+    }
+  }
+
+  function attachXeroCaptureProgress(card) {
+    if (
+      card.parentElement !== elements.conversation ||
+      elements.conversation.lastElementChild !== card
+    ) {
+      elements.conversation.append(card);
+    }
+  }
+
+  function normaliseXeroReviewRunId(value) {
+    const reviewRunId = typeof value === "string" ? value.trim() : "";
+    return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(reviewRunId)
+      ? reviewRunId
+      : "";
+  }
+
+  function renderXeroCaptureStatus(payload, statusSessionId = sessionId) {
+    if (sessionId !== statusSessionId) {
+      return;
+    }
+    xeroCaptureEnabled = payload?.enabled === true;
+    xeroCaptureAvailable = payload?.available === true;
+    syncXeroCaptureButtons();
+    const run = payload?.run;
+    if (
+      activeAgentId !== BOOKKEEPING_AGENT_ID ||
+      !run ||
+      typeof run.runId !== "string" ||
+      !XERO_CAPTURE_STATE[run.state]
+    ) {
+      hideXeroCaptureProgress();
+      stopXeroCapturePolling();
+      xeroCapturePollFailures = 0;
+      return;
+    }
+
+    const reviewRunId = normaliseXeroReviewRunId(
+      run.reviewRunId ?? payload?.reviewRunId,
+    );
+    const incomingUpdatedAtMs = Number.isFinite(Date.parse(run.updatedAt))
+      ? Date.parse(run.updatedAt)
+      : 0;
+    const incomingCreatedAtMs = Number.isFinite(Date.parse(run.createdAt))
+      ? Date.parse(run.createdAt)
+      : 0;
+    const resultUpdatedAtMs = Math.max(
+      incomingUpdatedAtMs,
+      incomingCreatedAtMs,
+    );
+    if (
+      activeXeroCaptureSessionId === statusSessionId &&
+      activeXeroCaptureRunId === run.runId
+    ) {
+      // A status poll can overlap a cancellation or a fast review completion.
+      // Never let an older/non-terminal response replace newer terminal state.
+      if (
+        XERO_CAPTURE_TERMINAL_STATES.has(activeXeroCaptureState) &&
+        !XERO_CAPTURE_TERMINAL_STATES.has(run.state)
+      ) {
+        return;
+      }
+      if (
+        incomingUpdatedAtMs > 0 &&
+        activeXeroCaptureUpdatedAtMs > 0 &&
+        incomingUpdatedAtMs < activeXeroCaptureUpdatedAtMs
+      ) {
+        return;
+      }
+    } else {
+      activeXeroCaptureUpdatedAtMs = 0;
+    }
+    activeXeroCaptureSessionId = statusSessionId;
+    activeXeroCaptureRunId = run.runId;
+    activeXeroReviewRunId = reviewRunId;
+    activeXeroCaptureState = run.state;
+    activeXeroCaptureUpdatedAtMs = Math.max(
+      activeXeroCaptureUpdatedAtMs,
+      incomingUpdatedAtMs,
+    );
+    const state = XERO_CAPTURE_STATE[run.state];
+    const { card, note, fill, meta, actions, open, cancel, show } =
+      xeroCaptureProgressCard();
+    card.classList.toggle(
+      "scan-progress--done",
+      run.state === "ready" || run.state === "cancelled",
+    );
+    card.classList.toggle("scan-progress--failed", run.state === "failed");
+    const total = Number(run.total) || 0;
+    const current = Number(run.current) || 0;
+    const dynamicPercent =
+      total > 0 && ["discovering", "capturing", "verifying"].includes(run.state)
+        ? Math.max(
+            state.percent,
+            Math.min(state.percent + 14, state.percent + Math.round((current / total) * 14)),
+          )
+        : state.percent;
+    fill.style.width = `${dynamicPercent}%`;
+    note.textContent =
+      typeof run.note === "string" && run.note.trim()
+        ? run.note.trim()
+        : state.note;
+
+    const details = [];
+    if (total > 0) {
+      details.push(`${Math.min(current, total)}/${total}`);
+    }
+    if (Number(run.accountCount) > 0) {
+      details.push(
+        `${Number(run.accountCount)} bank account${Number(run.accountCount) === 1 ? "" : "s"}`,
+      );
+    }
+    if (Number(run.expectedCount) > 0) {
+      details.push(
+        `${Number(run.capturedCount) || 0}/${Number(run.expectedCount)} rows`,
+      );
+    }
+    if (run.source === "agent") {
+      details.push("started by Bookkeeping");
+    }
+    meta.textContent = details.join(" · ");
+    actions.hidden = run.state === "cancelled";
+    open.hidden = run.state === "ready" || run.state === "cancelled";
+    cancel.hidden = XERO_CAPTURE_TERMINAL_STATES.has(run.state);
+    show.hidden = run.state !== "ready";
+    card.hidden = false;
+    attachXeroCaptureProgress(card);
+    if (XERO_CAPTURE_TERMINAL_STATES.has(run.state)) {
+      // Terminal runs no longer change. Stopping here avoids an unbounded
+      // stream of status requests (and tool-audit rows) from an idle tab.
+      stopXeroCapturePolling();
+      xeroCapturePollFailures = 0;
+    }
+    if (run.state === "ready" && reviewRunId) {
+      scheduleXeroSuggestionDelivery({
+        sessionId: statusSessionId,
+        captureRunId: run.runId,
+        reviewRunId,
+        resultUpdatedAtMs,
+      });
+    }
+  }
+
+  async function refreshXeroCaptureStatus() {
+    if (activeAgentId !== BOOKKEEPING_AGENT_ID) {
+      return;
+    }
+    if (xeroCaptureStatusInFlight) {
+      // Conversation B can request status while conversation A's request is
+      // still in flight. Remember that demand; A's stale response is discarded
+      // below and the finally block immediately starts a B-bound refresh.
+      xeroCaptureStatusRefreshPending = true;
+      return;
+    }
+    const requestedSessionId = sessionId;
+    const requestedAgentId = activeAgentId;
+    xeroCaptureStatusInFlight = true;
+    try {
+      const response = await fetch(
+        `/api/xero-capture/runs?sessionId=${encodeURIComponent(requestedSessionId)}`,
+        { headers: { Accept: "application/json" } },
+      );
+      if (
+        sessionId !== requestedSessionId ||
+        activeAgentId !== requestedAgentId ||
+        switchingConversation
+      ) {
+        return;
+      }
+      if (!response.ok) {
+        throw new Error("Xero capture status is temporarily unavailable.");
+      }
+      const payload = await response.json();
+      renderXeroCaptureStatus(payload, requestedSessionId);
+      if (
+        payload?.run &&
+        !XERO_CAPTURE_TERMINAL_STATES.has(payload.run.state) &&
+        xeroCaptureEnabled &&
+        xeroCaptureAvailable
+      ) {
+        xeroCapturePollFailures = 0;
+        ensureXeroCapturePolling();
+      }
+    } catch {
+      if (
+        sessionId !== requestedSessionId ||
+        activeAgentId !== requestedAgentId ||
+        switchingConversation
+      ) {
+        return;
+      }
+      xeroCaptureAvailable = false;
+      syncXeroCaptureButtons();
+      xeroCapturePollFailures += 1;
+      if (
+        activeAgentId === BOOKKEEPING_AGENT_ID &&
+        xeroCapturePollFailures <= 3
+      ) {
+        ensureXeroCapturePolling(
+          XERO_CAPTURE_POLL_MS * 2 ** (xeroCapturePollFailures - 1),
+        );
+      } else {
+        stopXeroCapturePolling();
+      }
+    } finally {
+      xeroCaptureStatusInFlight = false;
+      const refreshPending = xeroCaptureStatusRefreshPending;
+      xeroCaptureStatusRefreshPending = false;
+      if (refreshPending && activeAgentId === BOOKKEEPING_AGENT_ID) {
+        void refreshXeroCaptureStatus();
+      }
+    }
+  }
+
+  async function startXeroCapture(source = "user") {
+    if (
+      activeAgentId !== BOOKKEEPING_AGENT_ID ||
+      switchingConversation ||
+      !xeroCaptureEnabled ||
+      !xeroCaptureAvailable ||
+      xeroCaptureStartInFlight
+    ) {
+      return;
+    }
+    const requestedSessionId = sessionId;
+    const requestedAgentId = activeAgentId;
+    xeroCaptureStartInFlight = true;
+    syncXeroCaptureButtons();
+    elements.xeroCaptureStart.disabled = true;
+    elements.xeroCaptureGuidance.textContent =
+      "The local companion will open Xero after it is ready. Choose All bank accounts and a date range covering your unreconciled history, then export CSV and leave it in Downloads.";
+    try {
+      const response = await fetch("/api/xero-capture/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: requestedSessionId, source }),
+      });
+      const payload = await parseResponse(
+        response,
+        "The Xero export run could not be started.",
+      );
+      if (
+        sessionId === requestedSessionId &&
+        activeAgentId === requestedAgentId
+      ) {
+        renderXeroCaptureStatus(payload, requestedSessionId);
+        if (!XERO_CAPTURE_TERMINAL_STATES.has(payload?.run?.state)) {
+          xeroCapturePollFailures = 0;
+          ensureXeroCapturePolling();
+        }
+      }
+    } catch (error) {
+      if (
+        sessionId === requestedSessionId &&
+        activeAgentId === requestedAgentId
+      ) {
+        addError(
+          error instanceof Error
+            ? error.message
+            : "The Xero export run could not be started.",
+        );
+      }
+    } finally {
+      xeroCaptureStartInFlight = false;
+      syncXeroCaptureButtons();
+    }
+  }
+
+  async function cancelXeroCapture() {
+    if (!activeXeroCaptureRunId) {
+      return;
+    }
+    const runId = activeXeroCaptureRunId;
+    const requestedSessionId = sessionId;
+    const requestedAgentId = activeAgentId;
+    try {
+      const response = await fetch(
+        `/api/xero-capture/runs/${encodeURIComponent(runId)}?sessionId=${encodeURIComponent(requestedSessionId)}`,
+        { method: "DELETE" },
+      );
+      const payload = await parseResponse(
+        response,
+        "The Xero export run could not be cancelled.",
+      );
+      if (
+        sessionId === requestedSessionId &&
+        activeAgentId === requestedAgentId &&
+        activeXeroCaptureRunId === runId
+      ) {
+        renderXeroCaptureStatus(payload, requestedSessionId);
+      }
+    } catch (error) {
+      if (
+        sessionId === requestedSessionId &&
+        activeAgentId === requestedAgentId
+      ) {
+        addError(
+          error instanceof Error
+            ? error.message
+            : "The Xero export run could not be cancelled.",
+        );
+      }
+    }
+  }
+
+  function syncXeroCaptureProgress() {
+    if (activeAgentId === BOOKKEEPING_AGENT_ID) {
+      void refreshXeroCaptureStatus();
+      return;
+    }
+    stopXeroCapturePolling();
+    xeroCaptureStatusRefreshPending = false;
+    xeroCaptureEnabled = false;
+    xeroCaptureAvailable = false;
+    xeroCapturePollFailures = 0;
+    elements.xeroCaptureLaunch.hidden = true;
+    hideXeroCaptureProgress();
   }
 
   // ---- Funding search progress ------------------------------------------
@@ -2691,25 +3451,29 @@
   // instruction would sit in the transcript for ever looking like the owner
   // wrote it. How to say it belongs in the skill, not in a string here.
   const SCAN_RESULT_PROMPT = "What did the funding search find?";
+  const MONTHLY_UPDATE_RESULT_PROMPT = "What does the monthly update say?";
   // A scheduled search runs at 11am with nobody watching, so waiting for a tab
   // that saw it running meant the owner still had to ask. Delivery is now
   // decided by what this browser has already read out, kept where it survives
   // a reload, rather than by what one page happened to witness.
-  // One list of everything this browser has already read out, funding searches
-  // and scheduled tasks alike, so neither can arrive twice and a reload does
-  // not undo the memory of it.
+  // One list of everything this browser has already read out — funding
+  // searches, scheduled tasks, monthly updates, and Xero reviews — so none can
+  // arrive twice and a reload does not undo the memory of it.
   const DELIVERED_KEY = "chat-results-delivered";
   // Old enough and it is not news any more: the owner has moved on, and an
   // unprompted read-out of yesterday's work is noise. They can still ask.
   const DELIVER_WITHIN_MS = 12 * 60 * 60 * 1000;
   const DELIVERED_REMEMBERED = 60;
   let scanPollTimer = null;
+  let monthlyUpdatePollTimer = null;
   let resultsPollTimer = null;
   // Set once the backend reports no scheduled-task workflow, so switching
   // agents does not start the poll up again for a feature that is not there.
   let scheduleResultsUnavailable = false;
   let scanWasRunning = false;
   let scanDoneUntil = 0;
+  let monthlyUpdateWasRunning = false;
+  let monthlyUpdateDoneUntil = 0;
   let deliveringScan = false;
   // A floor under the whole mechanism. Marking the search as read handles the
   // ordinary case, but it only works while finishedAt holds still; anything
@@ -2717,6 +3481,7 @@
   // conversation into fifty read-outs. One a minute, whatever else is wrong.
   let lastDeliveredAt = 0;
   let scanCard = null;
+  let monthlyUpdateCard = null;
 
   function deliveredList() {
     try {
@@ -2800,6 +3565,24 @@
       return false;
     }
     return !alreadyDelivered(`scan:${finishedAt}`);
+  }
+
+  function monthlyUpdateDeliveryId(update) {
+    const runId = String(update.runId ?? "").trim();
+    const finishedAt = String(update.finishedAt ?? "").trim();
+    return runId ? `monthly:${runId}` : `monthly:${finishedAt}`;
+  }
+
+  function worthDeliveringMonthlyUpdate(update) {
+    const finishedAt = String(update.finishedAt ?? "");
+    if (update.interrupted === true || finishedAt === "") {
+      return false;
+    }
+    const finished = Date.parse(finishedAt);
+    if (Number.isNaN(finished) || Date.now() - finished > DELIVER_WITHIN_MS) {
+      return false;
+    }
+    return !alreadyDelivered(monthlyUpdateDeliveryId(update));
   }
 
   // --- tasks that ran on a schedule ---------------------------------------
@@ -2981,6 +3764,123 @@
     attachScanCard(card);
   }
 
+  function monthlyUpdateProgressCard() {
+    if (monthlyUpdateCard) {
+      return monthlyUpdateCard;
+    }
+    const card = document.createElement("div");
+    card.className = "scan-progress";
+    card.id = "monthly-update-progress";
+    card.setAttribute("role", "status");
+    card.setAttribute("aria-live", "polite");
+    card.hidden = true;
+
+    const spinner = document.createElement("div");
+    spinner.className = "scan-progress__spinner";
+    spinner.setAttribute("aria-hidden", "true");
+
+    const body = document.createElement("div");
+    body.className = "scan-progress__body";
+    const note = document.createElement("p");
+    note.className = "scan-progress__note";
+    const track = document.createElement("div");
+    track.className = "scan-progress__track";
+    track.setAttribute("aria-hidden", "true");
+    const fill = document.createElement("div");
+    fill.className = "scan-progress__fill";
+    track.append(fill);
+    body.append(note, track);
+
+    const meta = document.createElement("p");
+    meta.className = "scan-progress__meta";
+
+    card.append(spinner, body, meta);
+    monthlyUpdateCard = { card, note, fill, meta };
+    return monthlyUpdateCard;
+  }
+
+  function attachMonthlyUpdateCard(card) {
+    if (card.parentElement !== elements.conversation) {
+      elements.conversation.append(card);
+      return;
+    }
+    if (elements.conversation.lastElementChild !== card) {
+      elements.conversation.append(card);
+    }
+  }
+
+  function hideMonthlyUpdateCard() {
+    if (monthlyUpdateCard) {
+      monthlyUpdateCard.card.hidden = true;
+      monthlyUpdateCard.card.remove();
+    }
+  }
+
+  function renderMonthlyUpdateProgress(update) {
+    if (!update || update.available === false || update.hasRun === false) {
+      hideMonthlyUpdateCard();
+      return;
+    }
+    const { card, note, fill, meta } = monthlyUpdateProgressCard();
+
+    if (update.running === true) {
+      const wasHidden = card.hidden;
+      monthlyUpdateWasRunning = true;
+      card.classList.remove("scan-progress--done");
+      const total = Number(update.of) || 7;
+      const step = Number(update.step) || 0;
+      const percent = Math.max(
+        4,
+        Math.min(96, Math.round((step / total) * 100)),
+      );
+      fill.style.width = `${percent}%`;
+      note.textContent = String(update.note ?? "Preparing the monthly update…");
+      const started = Number(update.startedMinutesAgo);
+      const quiet = Number(update.updatedMinutesAgo);
+      let text = Number.isFinite(started) ? `Started ${started} min ago` : "";
+      if (Number.isFinite(quiet) && quiet >= 3) {
+        text += ` · last update ${quiet} min ago`;
+      }
+      meta.textContent = text;
+      card.hidden = false;
+      attachMonthlyUpdateCard(card);
+      if (wasHidden) {
+        scrollConversation();
+      }
+      return;
+    }
+
+    if (monthlyUpdateWasRunning) {
+      monthlyUpdateWasRunning = false;
+      monthlyUpdateDoneUntil = Date.now() + 90_000;
+    }
+    if (worthDeliveringMonthlyUpdate(update)) {
+      monthlyUpdateDoneUntil = Date.now() + 90_000;
+      void deliverViaAgent(
+        monthlyUpdateDeliveryId(update),
+        MONTHLY_UPDATE_RESULT_PROMPT,
+      );
+    }
+    if (Date.now() >= monthlyUpdateDoneUntil) {
+      hideMonthlyUpdateCard();
+      return;
+    }
+
+    card.classList.add("scan-progress--done");
+    fill.style.width = "100%";
+    const month = String(update.monthLabel ?? "").trim();
+    const status = String(update.status ?? "");
+    note.textContent =
+      update.interrupted === true
+        ? "The monthly update stopped without finishing. Ask me to run it again."
+        : status === "failed"
+          ? `${month || "The monthly update"} could not be completed.`
+          : `${month || "The monthly update"} is ready.`;
+    meta.textContent = "";
+    card.hidden = false;
+    attachMonthlyUpdateCard(card);
+  }
+
   // Sending re-polls when it finishes, and an unmarked search would deliver
   // again on that poll, and again on the poll after that one — fifty read-outs
   // in four seconds, each one triggering the next. So the search is marked
@@ -3024,6 +3924,24 @@
     resultsPollTimer = null;
   }
 
+  async function refreshMonthlyUpdateProgress() {
+    if (activeAgentId !== FUNDING_AGENT_ID) {
+      return;
+    }
+    try {
+      const response = await fetch("/api/monthly-update-progress", {
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) {
+        hideMonthlyUpdateCard();
+        return;
+      }
+      renderMonthlyUpdateProgress(await response.json());
+    } catch {
+      hideMonthlyUpdateCard();
+    }
+  }
+
   function syncScanProgress() {
     // Scheduled work belongs to every agent, not just this one, so its poll
     // runs whoever is on screen. The funding progress bar is Investment's
@@ -3038,6 +3956,12 @@
         }, SCAN_POLL_MS);
       }
       void refreshScanProgress();
+      if (monthlyUpdatePollTimer === null) {
+        monthlyUpdatePollTimer = window.setInterval(() => {
+          void refreshMonthlyUpdateProgress();
+        }, SCAN_POLL_MS);
+      }
+      void refreshMonthlyUpdateProgress();
       return;
     }
     if (scanPollTimer !== null) {
@@ -3047,13 +3971,22 @@
     scanWasRunning = false;
     scanDoneUntil = 0;
     hideScanCard();
+    if (monthlyUpdatePollTimer !== null) {
+      window.clearInterval(monthlyUpdatePollTimer);
+      monthlyUpdatePollTimer = null;
+    }
+    monthlyUpdateWasRunning = false;
+    monthlyUpdateDoneUntil = 0;
+    hideMonthlyUpdateCard();
   }
 
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
       void refreshScanProgress();
+      void refreshMonthlyUpdateProgress();
       void refreshScheduleResults();
       void refreshArticlePanel();
+      void refreshXeroCaptureStatus();
     }
   });
 
@@ -3098,6 +4031,10 @@
       return;
     }
     void sendMessage(elements.input.value, true);
+  });
+
+  elements.xeroCaptureStart.addEventListener("click", () => {
+    void startXeroCapture("user");
   });
 
   elements.input.addEventListener("input", () => {
