@@ -99,7 +99,7 @@ so and it will save it again.
 
 ## Timezones
 
-Say nothing and times mean **Australia/Melbourne**.
+Say nothing and times mean **Australia/Sydney**.
 
 That is a fixed default rather than a reading of whatever clock the agent
 happens to be running on, which matters more than it sounds. An agent's own

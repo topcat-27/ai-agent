@@ -70,7 +70,7 @@ and a time instead.
 Pass the time exactly as the owner said it. "8am", "5:30pm", "17:30" all read
 correctly.
 
-A schedule saved without a timezone is Australia/Melbourne. That is a fixed
+A schedule saved without a timezone is Australia/Sydney. That is a fixed
 default rather than the agent's own clock, so a schedule means the same time
 whether the agent is running on a laptop or in the cloud. The tool reports the
 timezone it used every time, so read it back.

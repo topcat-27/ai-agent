@@ -34,7 +34,7 @@
             "dayOfWeek": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('dayOfWeek', `For a weekly schedule, which day, such as tuesday. Ignored otherwise.`, 'string') }}",
             "dayOfMonth": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('dayOfMonth', `For a monthly schedule, which day of the month, 1 to 28. Ignored otherwise.`, 'string') }}",
             "date": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('date', `For a one-off, the date it should run, as YYYY-MM-DD. Leave empty for the next time that clock time comes round.`, 'string') }}",
-            "timezone": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('timezone', `The user's timezone as a standard name such as Europe/London or America/New_York, when they have said where they are or it is already known. Leave empty for Australia/Melbourne, which is what this agent assumes when nobody has said where they are; the tool reports back which timezone it used either way.`, 'string') }}",
+            "timezone": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('timezone', `The user's timezone as a standard name such as Europe/London or America/New_York, when they have said where they are or it is already known. Leave empty for Australia/Sydney, which is what this agent assumes when nobody has said where they are; the tool reports back which timezone it used either way.`, 'string') }}",
             "scheduleId": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('scheduleId', `Only when changing one particular saved schedule, using an ID from list_schedules. Leave empty otherwise.`, 'string') }}"
           },
           "matchingColumns": [],
@@ -349,7 +349,7 @@
     },
     {
       "find": "Use relevant details from only the current conversation.",
-      "replace": "The current date and time is ${new Date().toLocaleString('en-AU', { timeZone: 'Australia/Melbourne', dateStyle: 'full', timeStyle: 'short' })}, Australia/Melbourne. Work out today, tomorrow, next Monday, and the date in three weeks from that. Never ask the user what the date or time is.\n\nUse relevant details from only the current conversation."
+      "replace": "The current date and time is ${new Date().toLocaleString('en-AU', { timeZone: 'Australia/Sydney', dateStyle: 'full', timeStyle: 'short' })}, Australia/Sydney. Work out today, tomorrow, next Monday, and the date in three weeks from that. Never ask the user what the date or time is.\n\nUse relevant details from only the current conversation."
     }
   ],
   "unavailableCapabilities": [],

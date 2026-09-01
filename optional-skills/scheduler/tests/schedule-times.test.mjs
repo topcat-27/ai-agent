@@ -308,8 +308,8 @@ check(
 // schedule would have meant two different times, ten hours apart.
 const defaulted = asked({ timezone: "" });
 check(
-  defaulted.timezone === "Australia/Melbourne",
-  "a schedule saved without a timezone should be Melbourne",
+  defaulted.timezone === "Australia/Sydney",
+  "a schedule saved without a timezone should be Sydney",
 );
 check(
   !/resolvedOptions\(\)/.test(validate),
@@ -317,7 +317,7 @@ check(
 );
 // Nobody sees a timezone they did not choose unless they are told about it.
 check(
-  defaulted.assumptions.some((line) => line.includes("Australia/Melbourne")),
+  defaulted.assumptions.some((line) => line.includes("Australia/Sydney")),
   "assuming a timezone has to be reported, not done quietly",
 );
 check(
