@@ -91,6 +91,9 @@ run("read-only upgrade preflight", process.execPath, [
 run("cloud skill seeding", process.execPath, [
   "scripts/test-cloud-skills.mjs",
 ]);
+run("monthly update progress frontend", process.execPath, [
+  "scripts/test-monthly-update-ui.mjs",
+]);
 run("SEO article installed-skill upgrade", process.execPath, [
   "scripts/test-seo-article-upgrade.mjs",
 ]);

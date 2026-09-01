@@ -164,6 +164,54 @@
       "workflowId": "phase11GetPaidDomainResearch"
     },
     {
+      "id": "check_gmail_connection",
+      "risk": "read",
+      "available": true,
+      "modelCallable": true,
+      "mode": "automatic",
+      "workflowId": "phase16CheckGmailConnection"
+    },
+    {
+      "id": "get_monthly_update",
+      "risk": "read",
+      "available": true,
+      "modelCallable": true,
+      "mode": "automatic",
+      "workflowId": "phase16GetMonthlyUpdate"
+    },
+    {
+      "id": "start_monthly_update",
+      "risk": "bounded_external_read_and_local_write",
+      "available": true,
+      "modelCallable": true,
+      "mode": "explicit_request_required",
+      "workflowId": "phase16StartMonthlyUpdate"
+    },
+    {
+      "id": "set_company_profile",
+      "risk": "bounded_local_write",
+      "available": true,
+      "modelCallable": true,
+      "mode": "explicit_request_required",
+      "workflowId": "phase16SetCompanyProfile"
+    },
+    {
+      "id": "run_monthly_update",
+      "risk": "bounded_external_read_and_local_write",
+      "available": true,
+      "modelCallable": false,
+      "mode": "internal_background_only",
+      "workflowId": "phase16RunMonthlyUpdate"
+    },
+    {
+      "id": "run_thread_extraction",
+      "risk": "bounded_external_read",
+      "available": true,
+      "modelCallable": false,
+      "mode": "internal_background_only",
+      "workflowId": "phase16RunThreadExtraction"
+    },
+    {
       "id": "delete_task",
       "risk": "destructive",
       "available": false,

@@ -84,7 +84,9 @@
         "11-setup-sync-enabled-skills.json",
         "90-debug-agent-health.json",
         "16-setup-schedule-data.json",
-        "14-setup-funding-data.json"
+        "14-setup-funding-data.json",
+        "62-internal-gmail-status.json",
+        "15-setup-monthly-update-data.json"
       ]
     },
     {
@@ -92,7 +94,8 @@
       "name": "5. Ways your agent gets started",
       "description": "Entry points that let something outside your computer start your agent: a Telegram message today, an inbox or a schedule later.",
       "workflows": [
-        "70-trigger-telegram-message.json"
+        "70-trigger-telegram-message.json",
+        "73-trigger-monthly-update.json"
       ]
     },
     {
@@ -119,6 +122,20 @@
         "78-tool-update-schedule.json",
         "79-trigger-scheduled-runs.json",
         "80-internal-schedule-results.json"
+      ]
+    },
+    {
+      "id": "skill-company-update",
+      "name": "7. Your monthly update",
+      "description": "Reading a month of your email and writing the update that comes out of it: starting a run, reading the result, and saving the company facts that decide which email counts.",
+      "workflows": [
+        "65-tool-start-monthly-update.json",
+        "66-tool-get-monthly-update.json",
+        "69-tool-check-gmail-connection.json",
+        "67-tool-set-company-profile.json",
+        "68-internal-monthly-update-progress.json",
+        "74-run-monthly-update.json",
+        "75-run-thread-extraction.json"
       ]
     }
   ]

@@ -13,3 +13,4 @@ linkedin-prospect-search
 scheduler
 funding-radar
 paid-domain-research
+monthly-update
