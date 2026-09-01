@@ -51,7 +51,10 @@
         "52-tool-get-business-memory.json",
         "56-tool-start-seo-article.json",
         "57-internal-write-seo-article.json",
-        "58-tool-get-seo-article.json"
+        "58-tool-get-seo-article.json",
+        "53-tool-start-paid-domain-research.json",
+        "54-tool-complete-paid-domain-research.json",
+        "55-tool-get-paid-domain-research.json"
       ]
     },
     {
@@ -80,7 +83,8 @@
         "10-setup-local-task-data.json",
         "11-setup-sync-enabled-skills.json",
         "90-debug-agent-health.json",
-        "16-setup-schedule-data.json"
+        "16-setup-schedule-data.json",
+        "14-setup-funding-data.json"
       ]
     },
     {
@@ -89,6 +93,20 @@
       "description": "Entry points that let something outside your computer start your agent: a Telegram message today, an inbox or a schedule later.",
       "workflows": [
         "70-trigger-telegram-message.json"
+      ]
+    },
+    {
+      "id": "skill-free-money",
+      "name": "6. Money you can apply for",
+      "description": "Grants, rebates, tax incentives, and credit programs your business could apply for: going and looking for them, reading back what was found, and saving the business facts that decide what you are eligible for.",
+      "workflows": [
+        "63-tool-get-funding-report.json",
+        "64-tool-set-funding-profile.json",
+        "65-internal-funding-progress.json",
+        "68-tool-start-funding-scan.json",
+        "71-run-funding-scan.json",
+        "72-run-funding-beat.json",
+        "76-trigger-daily-funding-scan.json"
       ]
     },
     {
