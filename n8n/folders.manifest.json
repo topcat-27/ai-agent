@@ -79,7 +79,8 @@
       "workflows": [
         "10-setup-local-task-data.json",
         "11-setup-sync-enabled-skills.json",
-        "90-debug-agent-health.json"
+        "90-debug-agent-health.json",
+        "16-setup-schedule-data.json"
       ]
     },
     {
@@ -88,6 +89,18 @@
       "description": "Entry points that let something outside your computer start your agent: a Telegram message today, an inbox or a schedule later.",
       "workflows": [
         "70-trigger-telegram-message.json"
+      ]
+    },
+    {
+      "id": "skill-scheduling",
+      "name": "7. Work that runs on a schedule",
+      "description": "Things your agent does on its own at a set time: saving a schedule, reading back what the schedules have turned up, changing one, and the clock that sets them off.",
+      "workflows": [
+        "76-tool-create-schedule.json",
+        "77-tool-list-schedules.json",
+        "78-tool-update-schedule.json",
+        "79-trigger-scheduled-runs.json",
+        "80-internal-schedule-results.json"
       ]
     }
   ]
